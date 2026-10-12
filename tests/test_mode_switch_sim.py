@@ -137,5 +137,5 @@ def test_no_switch_full_day_feeds_exactly_100_percent():
         if r.status == "done":
             for p in CFG.task(r.task_id).portions:
                 shares[p.cat] += p.share
-    assert shares == pytest.approx({"mladshaya": 1.0, "starshaya": 1.0})
+    assert shares == pytest.approx({"faya": 1.0, "stefa": 1.0})
     assert not [m for m in app.bot.sent if "ещё не отмечено" in m.text]  # семья отзывчива — эскалаций нет

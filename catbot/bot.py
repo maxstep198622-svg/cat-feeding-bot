@@ -408,7 +408,7 @@ class CatBot:
         context.user_data.pop("code_ok", None)
         await query.answer()
         await query.edit_message_text(
-            f"Готово, {texts.escape(member.name)}! Буду присылать напоминания сюда.\n\n{texts.HELP}",
+            f"Готово, {texts.escape(member.name)}! Буду присылать напоминания сюда.\n\n{texts.help_text(self.cfg)}",
             parse_mode=ParseMode.HTML,
         )
         await context.application.bot.send_message(chat_id, "Кнопки внизу всегда под рукой 👇", reply_markup=MAIN_KEYBOARD)
@@ -594,7 +594,7 @@ class CatBot:
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         markup = MAIN_KEYBOARD if self.member_of(update) else None
-        await update.effective_message.reply_text(texts.HELP, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await update.effective_message.reply_text(texts.help_text(self.cfg), parse_mode=ParseMode.HTML, reply_markup=markup)
 
     async def cmd_home(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         member_id = await self.guard(update)
@@ -709,7 +709,8 @@ class CatBot:
         member_id = await self.guard(update)
         if not member_id:
             return
-        usage = "Напиши так: <code>/weight Младшая 1.6</code> (вес в килограммах)"
+        example = texts.escape(self.cfg.cats[0].name) if self.cfg.cats else "Мурка"
+        usage = f"Напиши так: <code>/weight {example} 1.6</code> (вес в килограммах)"
         args = context.args or []
         if len(args) < 2:
             await update.effective_message.reply_text(usage, parse_mode=ParseMode.HTML)

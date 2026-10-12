@@ -153,7 +153,7 @@ SYMPTOMS = {
     "diarrhea": "понос",
     "blood": "кровь",
     "litter": "тужится в лотке / не может пописать",
-    "belly": "краснота или корочки на животе у Старшей",
+    "belly": "краснота или корочки на животе (от сосания)",
     "other": "другое — позвоню",
 }
 
@@ -294,7 +294,7 @@ HELP = """🐾 <b>Кошачий бот</b> напоминает, когда к�
 <b>Команды</b>
 /today — план на сегодня: что сделано, что ждёт (и кнопки «Готово»)
 /ration — сколько грамм давать каждой кошке и почему
-/weight — записать вес: <code>/weight Младшая 1.6</code>
+/weight — записать вес: <code>/weight {cat} 1.6</code>
 /plan — правила кормления коротко
 /mode — режим дня: будни, выходной, каникулы (родители)
 /pause и /resume — пауза, например на время отъезда (родители)
@@ -313,3 +313,7 @@ def _name(cfg: Config, member_id: str | None) -> str:
         return cfg.member(member_id).name
     except KeyError:
         return member_id
+
+
+def help_text(cfg: Config) -> str:
+    return HELP.replace("{cat}", escape(cfg.cats[0].name) if cfg.cats else "Мурка")
