@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -461,7 +462,9 @@ def parse_config(raw: dict, base_dir: Path | None = None) -> Config:
     except Exception as exc:  # ZoneInfoNotFoundError и ошибки формата
         raise ConfigError(f"timezone: неизвестный часовой пояс {tz_name!r}") from exc
 
-    join_code = str(_require(raw, "join_code", "конфиг")).strip()
+    if "join_code" not in raw:
+        raise ConfigError("Не задан семейный код: переменная окружения CATBOT_JOIN_CODE (или join_code в конфиге)")
+    join_code = str(raw["join_code"]).strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{4,64}", join_code):
         raise ConfigError("join_code: 4–64 символа — латиница, цифры, _ или - (иначе не сработает ссылка-приглашение)")
 
@@ -537,8 +540,10 @@ def parse_config(raw: dict, base_dir: Path | None = None) -> Config:
     )
 
 
-def load_config(path: str | Path) -> Config:
+def load_config(path: str | Path, env: dict | None = None) -> Config:
+    """Читает TOML. Семейный код берётся из окружения CATBOT_JOIN_CODE (важнее значения в файле)."""
     path = Path(path)
+    env = os.environ if env is None else env
     with path.open("rb") as fh:
         try:
             raw = tomllib.load(fh)
@@ -547,4 +552,6 @@ def load_config(path: str | Path) -> Config:
                 f"{path.name}: ошибка в записи TOML ({exc}). Частые причины: дробные числа — через точку (1.5), "
                 "текст — в кавычках, один ключ нельзя задать дважды."
             ) from exc
+    if env.get("CATBOT_JOIN_CODE"):
+        raw["join_code"] = env["CATBOT_JOIN_CODE"]
     return parse_config(raw, base_dir=path.resolve().parent)

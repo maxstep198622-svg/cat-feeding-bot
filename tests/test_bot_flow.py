@@ -353,7 +353,7 @@ def test_example_config_is_consistent():
     from catbot.config import load_config
     from catbot.scheduler import check_shares, instances_for_day
 
-    cfg = load_config(Path(__file__).resolve().parents[1] / "config.example.toml")
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.toml")
     assert check_shares(cfg) == []
     assert set(cfg.modes) == {"weekday", "weekend", "kanikuly", "papa_away"}
     weekday = [i.task.id for i in instances_for_day(cfg, MON)]

@@ -2,7 +2,7 @@ services:
   catbot:
     build: .
     restart: unless-stopped
-    env_file: .env            # строка CATBOT_TOKEN=... от @BotFather
+    env_file: .env            # CATBOT_TOKEN=... (от @BotFather) и CATBOT_JOIN_CODE=... (семейный код)
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./data:/app/data      # база с журналом кормлений

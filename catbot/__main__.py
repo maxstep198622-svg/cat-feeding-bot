@@ -26,7 +26,10 @@ def _plain(html: str) -> str:
 
 
 def check(config_path: str, day: date | None) -> int:
-    cfg = load_config(config_path)
+    # Для проверки расписания семейный код не нужен — подставляем заглушку, если его нет.
+    env = dict(os.environ)
+    env.setdefault("CATBOT_JOIN_CODE", "check-only")
+    cfg = load_config(config_path, env)
     day = day or datetime.now(cfg.timezone).date()
     print(f"Конфиг в порядке: {len(cfg.members)} участника(ов), {len(cfg.cats)} кошки, {len(cfg.tasks)} задач.")
     warnings = check_shares(cfg)

@@ -1,4 +1,4 @@
-"""Симуляция дня семьи на реальном config.example.toml со сменой режима в разные моменты.
+"""Симуляция дня семьи на реальном config.toml со сменой режима в разные моменты.
 
 Инварианты: один приём не дают дважды; ни один приём нового плана не пропадает молча
 (либо сделан, либо честно «пропущено»); нет ложных «пропущено» для данного приёма."""
@@ -17,7 +17,7 @@ from catbot.scheduler import day_mode, instances_for_day
 from catbot.storage import Store
 from test_bot_flow import FakeBot, Query
 
-CFG = load_config(Path(__file__).resolve().parents[1] / "config.example.toml")
+CFG = load_config(Path(__file__).resolve().parents[1] / "config.toml")
 CHATS = {"papa": 1, "tanya": 2, "tasya": 3}
 MON = date(2026, 10, 12)
 SAT = date(2026, 10, 17)

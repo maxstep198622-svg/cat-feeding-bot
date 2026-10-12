@@ -13,5 +13,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
-      - run: python -m catbot --check --config config.example.toml --date 2026-10-13
+      - run: python -m catbot --check --config config.toml --date 2026-10-13
       - run: python -m pytest -q

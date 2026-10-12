@@ -1,9 +1,11 @@
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ.setdefault("CATBOT_JOIN_CODE", "test-code")
 
 from catbot.config import parse_config  # noqa: E402
 
