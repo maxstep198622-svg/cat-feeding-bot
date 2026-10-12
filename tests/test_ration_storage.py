@@ -117,40 +117,51 @@ def test_plan_sync_rules(cfg):
     at = lambda hh, mm: datetime(2026, 10, 12, hh, mm, tzinfo=tz)
     weekend = instances_for_day(cfg, MON, "weekend")  # 08:30 завтрак, 13:30 обед, 19:00 ужин
     ids = {i.task.id: i.id for i in weekend}
+    E = lambda tid, hh, mm, status, sent, meal: Existing(f"{MON}|{tid}", at(hh, mm), status, sent, meal)
 
     # Первый запуск в день — всё по расписанию, даже прошедшее
     p = plan_sync(weekend, [], at(15, 0))
     assert [i.task.id for i in p.create] == ["wk_breakfast", "wk_lunch", "dinner"]
 
-    # Будний завтрак был в 07:45, обед (14:30) ещё не наступил; в 14:00 включили выходной
-    recs = [
-        Existing(f"{MON}|breakfast", at(7, 45), "done", 1, True),
-        Existing(f"{MON}|lunch", at(14, 30), "pending", 0, True),
-        Existing(f"{MON}|dinner", at(19, 0), "pending", 0, True),
-    ]
-    p = plan_sync(weekend, recs, at(14, 0))
+    # Будний завтрак уже дали; в 07:50 включили выходной — завтрак выходного не нужен, обед ждёт
+    recs = [E("breakfast", 7, 45, "done", 1, "breakfast"), E("lunch", 14, 30, "pending", 0, "lunch"),
+            E("dinner", 19, 0, "pending", 0, "dinner")]
+    p = plan_sync(weekend, recs, at(7, 50))
     assert p.delete == [f"{MON}|lunch"]
-    assert [i.task.id for i in p.create_skipped] == ["wk_breakfast"]  # завтрак уже был
-    assert [i.task.id for i in p.create_now] == ["wk_lunch"]  # обеда не было — напомнить сейчас
-    assert p.create_now[0].due == at(14, 0)
+    assert [i.task.id for i in p.create_skipped] == ["wk_breakfast"]
+    assert [i.task.id for i in p.create] == ["wk_lunch"]
 
-    # Обед уже напомнили (идёт), режим сменили — обед доводим до конца, выходной обед не нужен
-    recs[1] = Existing(f"{MON}|lunch", at(14, 30), "pending", 1, True)
+    # Обед ещё не давали, а его время в новом режиме прошло недавно — напомнить сейчас
+    p = plan_sync(weekend, recs, at(14, 0))
+    assert [i.task.id for i in p.create_now] == ["wk_lunch"] and p.create_now[0].due == at(14, 0)
+    # ...а если прошло больше 2 часов — честно «пропущено»
+    p = plan_sync(weekend, recs, at(15, 45))
+    assert [i.task.id for i in p.create_missed] == ["wk_lunch"]
+
+    # Обед уже напомнили (идёт) — доводим до конца, обед выходного не нужен
+    recs[1] = E("lunch", 14, 30, "pending", 1, "lunch")
     p = plan_sync(weekend, recs, at(14, 35))
     assert f"{MON}|lunch" not in p.delete + p.cancel
-    assert p.create_now == [] and {i.task.id for i in p.create_skipped} == {"wk_breakfast", "wk_lunch"}
+    assert {i.task.id for i in p.create_skipped} == {"wk_breakfast", "wk_lunch"}
 
-    # Вернули режим обратно: отменённая (но начатая) задача оживает, пустые следы удаляются
+    # Обед дали заранее по «Я дома» — его время ещё впереди, но приём засчитан
+    recs[1] = E("lunch", 14, 30, "done", 1, "lunch")
+    p = plan_sync(weekend, recs, at(12, 30))
+    assert "wk_lunch" in {i.task.id for i in p.create_skipped}
+
+    # Вернули режим: отменённая начатая задача оживает, только если её приём не дали
     weekday = instances_for_day(cfg, MON)
-    recs = [
-        Existing(f"{MON}|lunch", at(14, 30), "skipped", 1, True),
-        Existing(ids["wk_lunch"], at(13, 30), "skipped", 0, True),
-    ]
-    p = plan_sync(weekday, recs, at(14, 40))
-    assert p.revive == [f"{MON}|lunch"] and p.delete == [ids["wk_lunch"]]
+    recs = [E("lunch", 14, 30, "skipped", 1, "lunch"), E("wk_lunch", 13, 30, "done", 1, "lunch")]
+    assert plan_sync(weekday, recs, at(14, 40)).revive == []
+    recs = [E("lunch", 14, 30, "skipped", 1, "lunch")]
+    assert plan_sync(weekday, recs, at(14, 40)).revive == [f"{MON}|lunch"]
 
-    # Задачу убрали из конфига — отменяем, даже если её время прошло
-    recs = [Existing(f"{MON}|gone", at(9, 0), "pending", 1, True, known=False)]
+    # Неначатая «напомнить сейчас» при отмене режима удаляется, даже если её время прошло
+    recs = [E("wk_lunch", 13, 30, "pending", 0, "lunch")]
+    assert plan_sync(weekday, recs, at(13, 31)).delete == [ids["wk_lunch"]]
+
+    # Задачу убрали из конфига — отменяем
+    recs = [Existing(f"{MON}|gone", at(9, 0), "pending", 1, None)]
     assert plan_sync(weekday, recs, at(10, 0)).cancel == [f"{MON}|gone"]
 
 
@@ -192,3 +203,27 @@ def test_weights_and_kv(cfg):
     assert s.get_kv("paused") == "1"
     s.set_kv("paused", None)
     assert s.get_kv("paused") is None
+
+
+def test_migrates_database_from_first_version(tmp_path, cfg):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.executescript(
+        """
+        CREATE TABLE instances (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL, day TEXT NOT NULL, due_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending', assignee TEXT NOT NULL, sent_count INTEGER NOT NULL DEFAULT 0,
+            last_sent_at TEXT, snoozed_until TEXT, escalated_at TEXT, done_at TEXT, done_by TEXT
+        );
+        INSERT INTO instances(id, task_id, day, due_at, assignee) VALUES ('2026-10-12|lunch', 'lunch', '2026-10-12', '2026-10-12T14:30:00+03:00', 'tasya');
+        """
+    )
+    db.commit()
+    db.close()
+    s = Store(path)
+    rec = s.get("2026-10-12|lunch")
+    assert rec.leftovers is None and rec.followup_sent_at is None
+    s.ensure_instances(instances_for_day(cfg, MON), adjusted=True)
+    s.sync_due(instances_for_day(cfg, MON))

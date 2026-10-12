@@ -32,7 +32,7 @@ def base_raw():
         "reminders": {"repeat_every_min": 10, "max_repeats": 2, "escalate_after_min": 30, "give_up_after_min": 150},
         "tasks": [
             {
-                "id": "breakfast", "name": "Завтрак", "time": "07:45", "days": ["weekday"],
+                "id": "breakfast", "meal": "breakfast", "name": "Завтрак", "time": "07:45", "days": ["weekday"],
                 "primary": "papa", "backup": "tanya", "water": "Поменять воду", "followup": True,
                 "portions": [
                     {"cat": "kitten", "food": "kdry", "share": 0.3},
@@ -40,7 +40,7 @@ def base_raw():
                 ],
             },
             {
-                "id": "lunch", "name": "Обед", "time": "14:30", "days": ["weekday"],
+                "id": "lunch", "meal": "lunch", "name": "Обед", "time": "14:30", "days": ["weekday"],
                 "time_by_day": {"tue": "15:30"},
                 "primary": "tasya", "backup": "tanya", "on_home": True, "followup": True,
                 "steps": ["Закрой Младшую в комнате", "Положи корм"],
@@ -50,7 +50,7 @@ def base_raw():
                 ],
             },
             {
-                "id": "dinner", "name": "Ужин", "time": "19:00", "days": ["all"],
+                "id": "dinner", "meal": "dinner", "name": "Ужин", "time": "19:00", "days": ["all"],
                 "primary": "tasya", "backup": "tanya",
                 "portions": [
                     {"cat": "kitten", "food": "kdry", "share": 0.4},
@@ -58,7 +58,7 @@ def base_raw():
                 ],
             },
             {
-                "id": "wk_breakfast", "name": "Завтрак", "time": "08:30", "days": ["weekend", "holiday"],
+                "id": "wk_breakfast", "meal": "breakfast", "name": "Завтрак", "time": "08:30", "days": ["weekend", "holiday"],
                 "primary": "tanya", "backup": "papa",
                 "portions": [
                     {"cat": "kitten", "food": "kdry", "share": 0.3},
@@ -66,7 +66,7 @@ def base_raw():
                 ],
             },
             {
-                "id": "wk_lunch", "name": "Обед", "time": "13:30", "days": ["weekend", "holiday"],
+                "id": "wk_lunch", "meal": "lunch", "name": "Обед", "time": "13:30", "days": ["weekend", "holiday"],
                 "primary": "tasya", "backup": "papa",
                 "portions": [
                     {"cat": "kitten", "food": "kdry", "share": 0.3},

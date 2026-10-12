@@ -107,8 +107,9 @@ def handed_off(cfg: Config, inst: Instance, from_name: str, to_name: str, needs:
     return "\n".join([head, call, "", body]) if body else "\n".join([head, call])
 
 
-def done_stamp(task: Task, due: datetime, who: str, at: datetime) -> str:
-    return f"✅ <b>{escape(task.name)}</b> ({hm(due)}) — сделано: {escape(who)}, {hm(at)}"
+def done_stamp(task: Task, due: datetime, who: str, at: datetime, day: date | None = None) -> str:
+    when = f"{day.strftime('%d.%m')} {hm(due)}" if day else hm(due)
+    return f"✅ <b>{escape(task.name)}</b> ({when}) — сделано: {escape(who)}, {hm(at)}"
 
 
 def already_done(who: str, at: datetime, kind: str, day: date | None = None, today: date | None = None) -> str:
@@ -184,7 +185,7 @@ def day_summary(cfg: Config, day: date, mode: str, records: list[Record], now: d
         elif r.status == "missed":
             lines.append(f"❌ {hm(r.due_at)} {name} — пропущено ({assignee})")
         elif r.status == "skipped":
-            lines.append(f"⏭ {hm(r.due_at)} {name} — не нужно (сменили режим)")
+            lines.append(f"⏭ {hm(r.due_at)} {name} — не нужно: этот приём уже был")
         elif now < r.due_at:
             lines.append(f"⏳ {hm(r.due_at)} {name} — {assignee}")
         else:

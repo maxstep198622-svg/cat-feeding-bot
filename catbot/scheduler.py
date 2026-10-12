@@ -214,7 +214,7 @@ def check_shares(cfg: Config, tolerance: float = 0.02) -> list[str]:
 
 # --- Синхронизация задач дня с планом (смена режима, правка конфига) -----------
 
-SAME_MEAL_GAP = timedelta(hours=2)  # кормления разных режимов ближе 2 ч друг к другу — это один и тот же приём
+CATCH_UP = timedelta(hours=2)  # прошедший, но не данный приём нового режима напоминаем, если опоздали не больше чем на 2 ч
 
 
 @dataclass(frozen=True)
@@ -223,66 +223,84 @@ class Existing:
 
     id: str
     due: datetime
-    status: str
+    status: str  # pending | done | missed | skipped
     sent_count: int
-    feeding: bool
-    known: bool = True  # задача ещё есть в конфиге
+    meal: str | None  # ключ приёма (Task.meal); None — задачи больше нет в конфиге
+
+    @property
+    def gives_meal(self) -> bool:
+        """Этот приём уже дали или дают прямо сейчас (напоминание ушло)."""
+        return self.status == "done" or (self.status == "pending" and self.sent_count > 0)
 
 
 @dataclass
 class SyncPlan:
     create: list[Instance]  # новые задачи — ждут своего времени
-    create_now: list[Instance]  # новое кормление, время которого прошло, а кошек ещё не кормили — напомнить сейчас
-    create_skipped: list[Instance]  # новые задачи, которые уже не нужны (этот приём уже был)
+    create_now: list[Instance]  # время прошло недавно, а приём ещё не давали — напомнить сейчас
+    create_skipped: list[Instance]  # этот приём сегодня уже дали по другому режиму
+    create_missed: list[Instance]  # время давно прошло, приём не давали — честно «пропущено»
     delete: list[str]  # неначатые задачи, которых больше нет в плане
-    cancel: list[str]  # начатые (уже напомнили), но больше не нужные — закрыть сообщения
-    revive: list[str]  # отменённые раньше, но снова в плане — вернуть в работу
+    cancel: list[str]  # начатые (напоминание ушло), но больше не нужные — закрыть сообщения
+    revive: list[str]  # отменённые раньше, но снова в плане и приём не дан — вернуть в работу
 
 
 def plan_sync(insts: list[Instance], records: list[Existing], now: datetime) -> SyncPlan:
-    """Как привести записанные задачи дня к текущему плану.
+    """Как привести записанные задачи дня к текущему плану (смена режима дня, правка конфига).
 
-    Прошлое не переписываем: задачи старого режима, время которых наступило, доводим до конца.
-    Прошедшее кормление нового режима считаем уже состоявшимся, если в пределах 2 часов до него
-    было кормление по старому плану; иначе кошек ещё не кормили — напоминаем один раз, сейчас."""
+    Приёмы разных режимов связаны ключом meal (завтрак будней = завтрак выходного).
+    Если приём сегодня уже дали или дают сейчас — его двойник в новом режиме не нужен.
+    Начатые задачи старого режима доводим до конца; неначатые — убираем."""
     plan_ids = {i.id for i in insts}
-    result = SyncPlan([], [], [], [], [], [])
+    result = SyncPlan([], [], [], [], [], [], [])
+    by_id = {r.id: r for r in records}
+
+    # 1. Что остаётся от старого плана
     kept: list[Existing] = []
     for r in records:
+        if r.meal is None:  # задачу убрали из конфига
+            if r.status == "pending":
+                (result.cancel if r.sent_count else result.delete).append(r.id)
+            continue
         if r.id in plan_ids:
-            if r.status == "skipped":
-                if r.sent_count == 0:
-                    result.delete.append(r.id)  # пересоздадим по правилам ниже
-                    continue
-                result.revive.append(r.id)
-                r = Existing(r.id, r.due, "pending", r.sent_count, r.feeding, r.known)
+            if r.status == "skipped" and r.sent_count == 0:
+                result.delete.append(r.id)  # пересоздадим по правилам ниже
+                continue
             kept.append(r)
+        elif r.status == "pending":
+            # не в новом плане: начатую доводим до конца, неначатую убираем
+            if r.sent_count:
+                kept.append(r)
+            else:
+                result.delete.append(r.id)
         elif r.status == "skipped" and r.sent_count == 0:
-            result.delete.append(r.id)  # след прошлой смены режима — не нужен
-        elif r.status == "pending" and not r.known:  # задачу убрали из конфига
-            (result.cancel if r.sent_count else result.delete).append(r.id)
-        elif r.status != "pending" or r.due <= now:
-            kept.append(r)  # история и задачи «в процессе» остаются
-        elif r.sent_count == 0:
-            result.delete.append(r.id)
+            result.delete.append(r.id)  # пустой след прошлой смены режима
         else:
-            result.cancel.append(r.id)  # прислали заранее по «Я дома», но в новом плане её нет
+            kept.append(r)  # история: сделано, пропущено, отменено
 
+    def covered(meal: str, own_id: str) -> bool:
+        return any(k.meal == meal and k.id != own_id and k.gives_meal for k in kept)
+
+    # 2. Отменённые, но снова запланированные: оживляем, только если приём ещё не дали
+    for r in list(kept):
+        if r.id in plan_ids and r.status == "skipped":
+            if not covered(r.meal, r.id):
+                result.revive.append(r.id)
+
+    # 3. Новые задачи плана
     known = {r.id for r in records} - set(result.delete)
     new = [i for i in insts if i.id not in known]
     if not records:  # первый запуск в этот день — всё по расписанию
         result.create = new
         return result
-    future = [i for i in new if i.due > now]
-    past = [i for i in new if i.due <= now]
-    result.create = future
-    happened = [r.due for r in kept if r.feeding and r.due <= now and r.status in ("pending", "done", "missed")]
-    last = max(happened) if happened else None
-    hungry = [i for i in past if i.task.portions and (last is None or i.due > last + SAME_MEAL_GAP)]
-    latest = max(hungry, key=lambda i: i.due) if hungry else None
-    for i in past:
-        if i is latest:
+    for i in new:
+        if i.task.portions and covered(i.task.meal, i.id):
+            result.create_skipped.append(i)
+        elif i.due > now:
+            result.create.append(i)
+        elif not i.task.portions:
+            result.create_skipped.append(i)  # дело по уходу, время которого прошло, — не догоняем
+        elif now - i.due <= CATCH_UP:
             result.create_now.append(Instance(i.id, i.task, i.day, now.replace(second=0, microsecond=0)))
         else:
-            result.create_skipped.append(i)
+            result.create_missed.append(i)
     return result

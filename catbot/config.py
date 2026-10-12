@@ -79,6 +79,7 @@ class Task:
     max_repeats: int | None = None
     on_home: bool = False  # кнопка «Я дома» присылает задачу сразу, не дожидаясь времени
     followup: bool = False  # через followup_min спросить «остатки убраны? всё съела?»
+    meal: str = ""  # ключ приёма: одинаковый у одного и того же кормления в разных режимах
 
 
 @dataclass(frozen=True)
@@ -249,7 +250,7 @@ CAT_KEYS = {
 FOOD_KEYS = {"id", "name", "kind", "kcal_per_100g", "kcal_per_kg"}
 TASK_KEYS = {
     "id", "name", "kind", "time", "days", "time_by_day", "primary", "backup", "steps", "water", "portions",
-    "escalate_after_min", "give_up_after_min", "repeat_every_min", "max_repeats", "on_home", "followup",
+    "escalate_after_min", "give_up_after_min", "repeat_every_min", "max_repeats", "on_home", "followup", "meal",
 }
 PORTION_KEYS = {"cat", "food", "share"}
 PERIOD_KEYS = {"start", "end", "mode"}
@@ -414,6 +415,7 @@ def _parse_task(t: dict, valid_tags: set[str], member_ids: set[str], cat_ids: se
         max_repeats=opt_int("max_repeats", 0),
         on_home=_bool(t.get("on_home", False), f"{where}.on_home"),
         followup=_bool(t.get("followup", False), f"{where}.followup"),
+        meal=_str(t.get("meal", tid), f"{where}.meal"),
     )
 
 

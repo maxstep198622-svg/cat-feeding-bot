@@ -124,7 +124,21 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
+
+    # Колонки, добавленные после первых версий: база от старой версии бота дополняется сама.
+    MIGRATIONS = {
+        "followup_sent_at": "TEXT",
+        "leftovers": "TEXT",
+        "adjusted": "INTEGER NOT NULL DEFAULT 0",
+    }
+
+    def _migrate(self) -> None:
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(instances)")}
+        for name, ddl in self.MIGRATIONS.items():
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE instances ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         self.db.close()

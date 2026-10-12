@@ -63,6 +63,7 @@ COMMANDS = [
 OK, PERMANENT, TRANSIENT = "ok", "permanent", "transient"
 MILESTONES_FROM = time(9, 0)  # не будить родителей ночными сообщениями о возрасте
 WEIGHT_JUMP = 0.25  # изменение веса больше чем на 25% — переспросить
+YESTERDAY_GRACE = timedelta(hours=6)  # сколько после времени задачи принимать кнопки вчерашнего дня
 
 
 def settled(results: list[str]) -> bool:
@@ -109,7 +110,7 @@ class CatBot:
         mode = day_mode(self.cfg, day, override)
         insts = instances_for_day(self.cfg, day, override)
         records = [
-            Existing(r.id, r.due_at, r.status, r.sent_count, bool(t and t.kind == "feeding"), t is not None)
+            Existing(r.id, r.due_at, r.status, r.sent_count, t.meal if t else None)
             for r, t in ((r, self.task_of(r)) for r in self.store.for_day(day))
         ]
         plan = plan_sync(insts, records, now)
@@ -119,6 +120,7 @@ class CatBot:
         self.store.ensure_instances(plan.create)
         self.store.ensure_instances(plan.create_now, adjusted=True)
         self.store.ensure_instances(plan.create_skipped, status="skipped")
+        self.store.ensure_instances(plan.create_missed, status="missed")
         self.store.sync_due(insts)
         for instance_id in plan.cancel:
             await self.close_messages(app, instance_id, "⏭ Отменено: сменился план дня.")
@@ -464,8 +466,8 @@ class CatBot:
             await query.answer()
 
     def actionable_day(self, rec: Record, now: datetime) -> bool:
-        """Сегодняшние задачи и вчерашние, которые бот ещё ведёт (поздний вечер, после полуночи)."""
-        return rec.day == now.date() or rec.day == now.date() - timedelta(days=1)
+        """Сегодняшние задачи и поздние вчерашние, пока они свежие (ужин в 22:00 можно отметить после полуночи)."""
+        return rec.day == now.date() or (rec.day == now.date() - timedelta(days=1) and now - rec.due_at < YESTERDAY_GRACE)
 
     async def on_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE, member_id: str, inst: Instance) -> None:
         async with self.lock:
@@ -492,9 +494,11 @@ class CatBot:
             rec = self.store.get(inst.id)
             await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind, rec.day, now.date()), show_alert=True)
             return
-        stamp = texts.done_stamp(inst.task, inst.due, self.name(member_id), now)
+        stamp = texts.done_stamp(inst.task, inst.due, self.name(member_id), now, rec.day if rec.day != now.date() else None)
         await self.close_messages(context.application, inst.id, stamp)
-        if self.is_parent(member_id):
+        if rec.day != now.date():
+            await query.answer(f"Отмечено за {rec.day.strftime('%d.%m')} ✅", show_alert=True)
+        elif self.is_parent(member_id):
             await query.answer("Отмечено ✅")
         else:
             n = self.store.done_count(member_id, now.date() - timedelta(days=now.weekday()))
