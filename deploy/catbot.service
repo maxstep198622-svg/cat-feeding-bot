@@ -1,0 +1,20 @@
+# systemd-сервис для Linux-сервера или Raspberry Pi.
+# Установка:
+#   sudo cp deploy/catbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now catbot
+[Unit]
+Description=Cat feeding reminder Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=catbot
+WorkingDirectory=/opt/cat_bot
+EnvironmentFile=/opt/cat_bot/.env
+ExecStart=/opt/cat_bot/.venv/bin/python -m catbot --config /opt/cat_bot/config.toml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
