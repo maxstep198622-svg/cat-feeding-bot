@@ -19,9 +19,14 @@ class FakeBot:
         self.sent = []
         self.edited = []
         self._ids = count(1)
+        self.fail_with = None  # исключение, которое бросит следующая отправка (имитация сбоя сети)
 
-    async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
-        msg = SimpleNamespace(message_id=next(self._ids), chat_id=chat_id, text=text, markup=reply_markup)
+    async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, disable_notification=False):
+        if self.fail_with is not None:
+            raise self.fail_with
+        msg = SimpleNamespace(
+            message_id=next(self._ids), chat_id=chat_id, text=text, markup=reply_markup, silent=disable_notification
+        )
         self.sent.append(msg)
         return msg
 
@@ -76,14 +81,14 @@ class Query:
         self.answers.append(text)
 
 
-def press(env, member, data):
+def press(env, member, data, user_data=None):
     q = Query(data, CHATS[member])
     update = SimpleNamespace(
         callback_query=q,
-        effective_chat=SimpleNamespace(id=CHATS[member]),
+        effective_chat=SimpleNamespace(id=CHATS[member], type="private"),
         effective_user=SimpleNamespace(id=CHATS[member] * 1000, username=None),
     )
-    asyncio.run(env.bot.on_callback(update, SimpleNamespace(application=env.app, user_data={})))
+    asyncio.run(env.bot.on_callback(update, SimpleNamespace(application=env.app, user_data=user_data or {})))
     return q
 
 
@@ -189,6 +194,15 @@ def test_yesterday_pending_closed(env):
     tick(env, 14, 30)
     tick(env, 8, 0, day=date(2026, 10, 13))
     assert env.store.get(lunch_id()).status == "missed"
+    assert any("так и не отмечено" in m.text and m.silent for m in to(env, "papa"))  # без звука
+
+
+def test_older_pending_closed_silently(env):
+    tick(env, 14, 30)
+    before = len(env.fake.sent)
+    tick(env, 8, 0, day=date(2026, 10, 15))  # бот лежал два дня
+    assert env.store.get(lunch_id()).status == "missed"
+    assert not any("Обед" in m.text and "так и не отмечено" in m.text for m in env.fake.sent[before:])
 
 
 def test_mode_switch_drops_unstarted_tasks(env):
@@ -233,7 +247,7 @@ def say(env, member, text, args=None):
     msg = Message(text, CHATS[member])
     update = SimpleNamespace(
         effective_message=msg,
-        effective_chat=SimpleNamespace(id=CHATS[member]),
+        effective_chat=SimpleNamespace(id=CHATS[member], type="private"),
         effective_user=SimpleNamespace(id=CHATS[member] * 1000, username=None),
     )
     ctx = SimpleNamespace(application=env.app, user_data={}, args=args or [])

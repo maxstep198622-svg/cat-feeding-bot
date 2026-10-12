@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError) as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2
+    except (ValueError, TypeError, AttributeError, KeyError) as exc:
+        print(f"Ошибка конфигурации (проверьте типы значений): {exc!r}", file=sys.stderr)
+        return 2
 
     token = os.environ.get("CATBOT_TOKEN")
     if not token:

@@ -29,25 +29,28 @@ class Need:
     factor: float
     kcal: float
     manual: bool  # норма задана вручную (daily_kcal)
-    note: str = ""  # предупреждение для родителей, если расчёт выглядит странно
 
 
 def _spayed_on(cat: Cat, today: date) -> bool:
     return cat.neutered and (cat.neutered_on is None or cat.neutered_on <= today)
 
 
+def months_reached(cat: Cat, today: date, months: int) -> bool:
+    """Исполнилось ли кошке столько календарных месяцев (в день рождения — уже да)."""
+    return add_months(cat.birth_date, months) <= today
+
+
 def stage_and_factor(cfg: Config, cat: Cat, today: date) -> tuple[str, float]:
-    months = age_months(cat.birth_date, today)
     e = cfg.energy
-    if months >= 12:
+    if months_reached(cat, today, 12):
         if _spayed_on(cat, today):
             return "взрослая стерилизованная", e.adult_neutered
         return "взрослая нестерилизованная", e.adult_intact
-    if months < 4:
+    if not months_reached(cat, today, 4):
         stage, factor = "котёнок до 4 месяцев", e.kitten_0_4m
-    elif months < 6:
+    elif not months_reached(cat, today, 6):
         stage, factor = "котёнок 4–6 месяцев", e.kitten_4_6m
-    elif months < 9:
+    elif not months_reached(cat, today, 9):
         stage, factor = "котёнок 6–9 месяцев", e.kitten_6_9m
     else:
         stage, factor = "котёнок 9–12 месяцев", e.kitten_9_12m
@@ -66,7 +69,7 @@ def daily_need(cfg: Config, cat: Cat, today: date, weight_kg: float | None = Non
     weight = weight_kg or cat.weight_kg
     stage, factor = stage_and_factor(cfg, cat, today)
     months = age_months(cat.birth_date, today)
-    if months >= 12 and cat.ideal_weight_kg:
+    if months_reached(cat, today, 12) and cat.ideal_weight_kg:
         weight = cat.ideal_weight_kg
     if cat.energy_factor:
         factor = cat.energy_factor
@@ -74,11 +77,7 @@ def daily_need(cfg: Config, cat: Cat, today: date, weight_kg: float | None = Non
         kcal, manual = cat.daily_kcal, True
     else:
         kcal, manual = rer(weight) * factor, False
-    note = ""
-    per_kg = kcal / weight
-    if months < 4 and not _spayed_on(cat, today) and not 150 <= per_kg <= 220:
-        note = f"{per_kg:.0f} ккал на кг — вне обычного для 3–4 мес. коридора 150–220. Проверьте вес и обсудите с ветеринаром."
-    return Need(cat, weight, months, stage, factor, kcal, manual, note)
+    return Need(cat, weight, months, stage, factor, kcal, manual)
 
 
 def grams(kcal: float, food: Food) -> float:

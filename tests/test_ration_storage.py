@@ -19,7 +19,6 @@ def test_stages(cfg):
     n = daily_need(cfg, kitten, MON)
     assert n.stage == "котёнок до 4 месяцев" and n.factor == 2.5
     assert n.kcal == pytest.approx(rer(1.5) * 2.5)  # ≈ 237 ккал
-    assert n.note == ""  # 158 ккал/кг — в коридоре 150–220
     assert daily_need(cfg, kitten, date(2026, 12, 1)).factor == cfg.energy.kitten_4_6m
     assert daily_need(cfg, kitten, date(2027, 2, 1)).factor == cfg.energy.kitten_6_9m
     assert daily_need(cfg, kitten, date(2027, 5, 1)).factor == cfg.energy.kitten_9_12m
@@ -43,15 +42,21 @@ def test_kitten_spay_cut_after_recovery(raw):
     assert after.factor == pytest.approx(cfg.energy.kitten_4_6m * 0.9)
 
 
-def test_adult_uses_ideal_weight_and_sanity_note(raw):
+def test_adult_uses_ideal_weight(raw):
     from catbot.config import parse_config
 
     raw["cats"][1]["ideal_weight_kg"] = 3.6
-    raw["cats"][0]["weight_kg"] = 3.0  # слишком много для 3 месяцев: 133 ккал/кг
     cfg = parse_config(raw)
     a = daily_need(cfg, cfg.cats[1], MON, weight_kg=4.4)
     assert a.weight_kg == 3.6 and a.kcal == pytest.approx(rer(3.6) * cfg.energy.adult_neutered)
-    assert "коридор" in daily_need(cfg, cfg.cats[0], MON).note
+
+
+def test_stage_boundaries_use_calendar_months(cfg):
+    kitten = cfg.cats[0]  # родилась 2026-07-10
+    assert daily_need(cfg, kitten, date(2026, 11, 9)).stage == "котёнок до 4 месяцев"
+    assert daily_need(cfg, kitten, date(2026, 11, 10)).stage == "котёнок 4–6 месяцев"
+    assert daily_need(cfg, kitten, date(2027, 7, 9)).stage.startswith("котёнок 9–12")
+    assert daily_need(cfg, kitten, date(2027, 7, 10)).stage == "взрослая нестерилизованная"
 
 
 def test_milestones(cfg):

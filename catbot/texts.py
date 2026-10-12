@@ -85,10 +85,15 @@ def reminder(cfg: Config, inst: Instance, who: str, needs: dict[str, Need], repe
     return "\n".join(parts)
 
 
-def escalation(cfg: Config, inst: Instance, assignee: str, late_min: int, needs: dict[str, Need]) -> str:
+def escalation(
+    cfg: Config, inst: Instance, assignee: str, late_min: int, needs: dict[str, Need], unreachable: bool = False
+) -> str:
     task = inst.task
     head = f"⚠️ <b>{escape(task.name)}</b> ({hm(inst.due)}) ещё не отмечено."
-    info = f"Ответственный: {escape(assignee)}. Прошло {late_min} мин."
+    if unreachable:
+        info = f"Ответственный ({escape(assignee)}) не подключён к боту — напоминание не дошло."
+    else:
+        info = f"Ответственный: {escape(assignee)}. Прошло {late_min} мин."
     hint = "Если ты дома — сделай сам и нажми «✅ Готово». Если нет — позвони и напомни."
     body = task_body(cfg, task, needs)
     return "\n".join([head, info, hint, "", body]) if body else "\n".join([head, info, hint])
@@ -175,6 +180,8 @@ def day_summary(cfg: Config, day: date, mode: str, records: list[Record], now: d
             lines.append(f"✅ {hm(r.due_at)} {name} — {escape(_name(cfg, r.done_by))}, {hm(r.done_at)}")
         elif r.status == "missed":
             lines.append(f"❌ {hm(r.due_at)} {name} — пропущено ({assignee})")
+        elif r.status == "skipped":
+            lines.append(f"⏭ {hm(r.due_at)} {name} — не нужно (сменили режим)")
         elif now < r.due_at:
             lines.append(f"⏳ {hm(r.due_at)} {name} — {assignee}")
         else:
@@ -186,7 +193,7 @@ def ration_text(cfg: Config, needs: dict[str, Need], weighed: dict[str, date | N
     blocks = []
     for need in needs.values():
         cat = need.cat
-        if need.age_months >= 12 and cat.ideal_weight_kg and need.weight_kg == cat.ideal_weight_kg:
+        if cat.ideal_weight_kg and need.weight_kg == cat.ideal_weight_kg and need.stage.startswith("взрослая"):
             w_note = "идеальный вес"
         elif weighed.get(cat.id):
             w_note = f"взвешена {weighed[cat.id].strftime('%d.%m')}"
@@ -200,8 +207,6 @@ def ration_text(cfg: Config, needs: dict[str, Need], weighed: dict[str, date | N
         else:
             lines.append(f"Стадия: {need.stage}, {num(need.factor)} × RER")
             lines.append(f"Суточная норма ≈ <b>{need.kcal:.0f} ккал</b>")
-        if need.note:
-            lines.append(f"⚠️ {escape(need.note)}")
         for mode, insts in plans.items():
             items = []
             for inst in insts:

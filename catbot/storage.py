@@ -158,11 +158,16 @@ class Store:
 
     # --- задачи ---
 
-    def ensure_instances(self, instances: list[Instance]) -> None:
+    def ensure_instances(self, instances: list[Instance], skipped: set[str] = frozenset()) -> None:
+        """Создаёт задачи дня. Задачи из `skipped` сразу помечаются как ненужные (режим сменили, время прошло)."""
         with self.db:
             self.db.executemany(
-                "INSERT OR IGNORE INTO instances(id, task_id, day, due_at, assignee) VALUES (?, ?, ?, ?, ?)",
-                [(i.id, i.task.id, i.day.isoformat(), i.due.isoformat(), i.task.primary) for i in instances],
+                "INSERT OR IGNORE INTO instances(id, task_id, day, due_at, assignee, status) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (i.id, i.task.id, i.day.isoformat(), i.due.isoformat(), i.task.primary,
+                     "skipped" if i.id in skipped else "pending")
+                    for i in instances
+                ],
             )
 
     def sync_due(self, instances: list[Instance]) -> None:
@@ -173,15 +178,21 @@ class Store:
                 [(i.due.isoformat(), i.id) for i in instances],
             )
 
-    def drop_unplanned(self, day: date, keep_ids: set[str]) -> None:
-        """Убирает с этого дня неначатые задачи, которых больше нет в плане (сменили режим дня)."""
+    def drop_unplanned(self, day: date, keep_ids: set[str]) -> list[str]:
+        """Задачи этого дня, которых больше нет в плане (сменили режим или конфиг): неначатые удаляет,
+        начатые помечает skipped. Возвращает id начатых — их сообщения нужно закрыть."""
         rows = self.db.execute(
-            "SELECT id FROM instances WHERE day = ? AND status = 'pending' AND sent_count = 0", (day.isoformat(),)
+            "SELECT id, sent_count FROM instances WHERE day = ? AND status = 'pending'", (day.isoformat(),)
         ).fetchall()
-        stale = [r["id"] for r in rows if r["id"] not in keep_ids]
+        stale = [r for r in rows if r["id"] not in keep_ids]
+        started = [r["id"] for r in stale if r["sent_count"] > 0]
         if stale:
             with self.db:
-                self.db.executemany("DELETE FROM instances WHERE id = ?", [(s,) for s in stale])
+                self.db.executemany(
+                    "DELETE FROM instances WHERE id = ? AND sent_count = 0", [(r["id"],) for r in stale]
+                )
+                self.db.executemany("UPDATE instances SET status = 'skipped' WHERE id = ?", [(i,) for i in started])
+        return started
 
     def get(self, instance_id: str) -> Record | None:
         row = self.db.execute("SELECT * FROM instances WHERE id = ?", (instance_id,)).fetchone()
@@ -190,6 +201,12 @@ class Store:
     def for_day(self, day: date) -> list[Record]:
         rows = self.db.execute("SELECT * FROM instances WHERE day = ? ORDER BY due_at, task_id", (day.isoformat(),))
         return [_record(r) for r in rows]
+
+    def for_days(self, days: list[date]) -> list[Record]:
+        result = []
+        for day in days:
+            result += self.for_day(day)
+        return result
 
     def pending_before(self, day: date) -> list[Record]:
         rows = self.db.execute("SELECT * FROM instances WHERE day < ? AND status = 'pending'", (day.isoformat(),))
@@ -222,11 +239,14 @@ class Store:
             )
 
     def mark_done(self, instance_id: str, member_id: str, now: datetime) -> bool:
-        """Отмечает выполнение. False, если задача уже была выполнена кем-то раньше."""
+        """Отмечает выполнение. False, если задача уже была выполнена кем-то раньше.
+        Если задачу отмечают задним числом (была пропущена), вопрос про остатки уже не задаём."""
         with self.db:
             cur = self.db.execute(
-                "UPDATE instances SET status = 'done', done_at = ?, done_by = ? WHERE id = ? AND status != 'done'",
-                (now.isoformat(), member_id, instance_id),
+                "UPDATE instances SET status = 'done', done_at = ?, done_by = ?, "
+                "followup_sent_at = CASE WHEN status = 'missed' THEN ? ELSE followup_sent_at END "
+                "WHERE id = ? AND status != 'done'",
+                (now.isoformat(), member_id, now.isoformat(), instance_id),
             )
         return cur.rowcount == 1
 

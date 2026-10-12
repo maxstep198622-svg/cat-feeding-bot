@@ -76,7 +76,7 @@ def instances_for_day(cfg: Config, day: date, override: str | None = None) -> li
 
 @dataclass
 class State:
-    status: str = "pending"  # pending | done | missed
+    status: str = "pending"  # pending | done | missed | skipped (сменили режим дня)
     assignee: str = ""
     sent_count: int = 0
     last_sent_at: datetime | None = None
@@ -120,7 +120,13 @@ def decide(cfg: Config, inst: Instance, st: State, now: datetime) -> list[Action
     """Что нужно сделать с задачей прямо сейчас. Вызывается на каждом «тике»."""
     if st.status == "done":
         return _followup(cfg, inst, st, now)
-    if st.status != "pending" or now < inst.due:
+    if st.status != "pending":
+        return []
+    if now < inst.due:
+        # Напоминание могло прийти раньше времени по кнопке «Я дома» — тогда работает только отсрочка.
+        if st.sent_count and st.snoozed_until is not None and now >= st.snoozed_until:
+            if st.last_sent_at is None or st.last_sent_at < st.snoozed_until:
+                return [Action("remind", inst, st.sent_count)]
         return []
     late = now - inst.due
     if late >= _give_up_after(cfg, inst.task):
