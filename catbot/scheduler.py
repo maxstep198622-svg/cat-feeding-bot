@@ -210,3 +210,79 @@ def check_shares(cfg: Config, tolerance: float = 0.02) -> list[str]:
                     f"{label}: у кошки {cat_id!r} доли за день дают {total * 100:.0f}% вместо 100%"
                 )
     return warnings
+
+
+# --- Синхронизация задач дня с планом (смена режима, правка конфига) -----------
+
+SAME_MEAL_GAP = timedelta(hours=2)  # кормления разных режимов ближе 2 ч друг к другу — это один и тот же приём
+
+
+@dataclass(frozen=True)
+class Existing:
+    """Задача дня, уже записанная в базе."""
+
+    id: str
+    due: datetime
+    status: str
+    sent_count: int
+    feeding: bool
+    known: bool = True  # задача ещё есть в конфиге
+
+
+@dataclass
+class SyncPlan:
+    create: list[Instance]  # новые задачи — ждут своего времени
+    create_now: list[Instance]  # новое кормление, время которого прошло, а кошек ещё не кормили — напомнить сейчас
+    create_skipped: list[Instance]  # новые задачи, которые уже не нужны (этот приём уже был)
+    delete: list[str]  # неначатые задачи, которых больше нет в плане
+    cancel: list[str]  # начатые (уже напомнили), но больше не нужные — закрыть сообщения
+    revive: list[str]  # отменённые раньше, но снова в плане — вернуть в работу
+
+
+def plan_sync(insts: list[Instance], records: list[Existing], now: datetime) -> SyncPlan:
+    """Как привести записанные задачи дня к текущему плану.
+
+    Прошлое не переписываем: задачи старого режима, время которых наступило, доводим до конца.
+    Прошедшее кормление нового режима считаем уже состоявшимся, если в пределах 2 часов до него
+    было кормление по старому плану; иначе кошек ещё не кормили — напоминаем один раз, сейчас."""
+    plan_ids = {i.id for i in insts}
+    result = SyncPlan([], [], [], [], [], [])
+    kept: list[Existing] = []
+    for r in records:
+        if r.id in plan_ids:
+            if r.status == "skipped":
+                if r.sent_count == 0:
+                    result.delete.append(r.id)  # пересоздадим по правилам ниже
+                    continue
+                result.revive.append(r.id)
+                r = Existing(r.id, r.due, "pending", r.sent_count, r.feeding, r.known)
+            kept.append(r)
+        elif r.status == "skipped" and r.sent_count == 0:
+            result.delete.append(r.id)  # след прошлой смены режима — не нужен
+        elif r.status == "pending" and not r.known:  # задачу убрали из конфига
+            (result.cancel if r.sent_count else result.delete).append(r.id)
+        elif r.status != "pending" or r.due <= now:
+            kept.append(r)  # история и задачи «в процессе» остаются
+        elif r.sent_count == 0:
+            result.delete.append(r.id)
+        else:
+            result.cancel.append(r.id)  # прислали заранее по «Я дома», но в новом плане её нет
+
+    known = {r.id for r in records} - set(result.delete)
+    new = [i for i in insts if i.id not in known]
+    if not records:  # первый запуск в этот день — всё по расписанию
+        result.create = new
+        return result
+    future = [i for i in new if i.due > now]
+    past = [i for i in new if i.due <= now]
+    result.create = future
+    happened = [r.due for r in kept if r.feeding and r.due <= now and r.status in ("pending", "done", "missed")]
+    last = max(happened) if happened else None
+    hungry = [i for i in past if i.task.portions and (last is None or i.due > last + SAME_MEAL_GAP)]
+    latest = max(hungry, key=lambda i: i.due) if hungry else None
+    for i in past:
+        if i is latest:
+            result.create_now.append(Instance(i.id, i.task, i.day, now.replace(second=0, microsecond=0)))
+        else:
+            result.create_skipped.append(i)
+    return result

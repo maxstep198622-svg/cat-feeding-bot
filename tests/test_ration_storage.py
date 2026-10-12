@@ -110,14 +110,48 @@ def test_store_instances(cfg):
     assert not s.mark_missed(lunch)
 
 
-def test_store_drop_unplanned_keeps_started(cfg):
-    s = Store(":memory:")
-    insts = instances_for_day(cfg, MON)
-    s.ensure_instances(insts)
-    s.mark_sent(insts[0].id, now(cfg, 7, 45))
-    s.mark_done(insts[1].id, "tasya", now(cfg, 9, 0))
-    s.drop_unplanned(MON, set())
-    assert [r.task_id for r in s.for_day(MON)] == ["breakfast", "lunch"]
+def test_plan_sync_rules(cfg):
+    from catbot.scheduler import Existing, plan_sync
+
+    tz = cfg.timezone
+    at = lambda hh, mm: datetime(2026, 10, 12, hh, mm, tzinfo=tz)
+    weekend = instances_for_day(cfg, MON, "weekend")  # 08:30 завтрак, 13:30 обед, 19:00 ужин
+    ids = {i.task.id: i.id for i in weekend}
+
+    # Первый запуск в день — всё по расписанию, даже прошедшее
+    p = plan_sync(weekend, [], at(15, 0))
+    assert [i.task.id for i in p.create] == ["wk_breakfast", "wk_lunch", "dinner"]
+
+    # Будний завтрак был в 07:45, обед (14:30) ещё не наступил; в 14:00 включили выходной
+    recs = [
+        Existing(f"{MON}|breakfast", at(7, 45), "done", 1, True),
+        Existing(f"{MON}|lunch", at(14, 30), "pending", 0, True),
+        Existing(f"{MON}|dinner", at(19, 0), "pending", 0, True),
+    ]
+    p = plan_sync(weekend, recs, at(14, 0))
+    assert p.delete == [f"{MON}|lunch"]
+    assert [i.task.id for i in p.create_skipped] == ["wk_breakfast"]  # завтрак уже был
+    assert [i.task.id for i in p.create_now] == ["wk_lunch"]  # обеда не было — напомнить сейчас
+    assert p.create_now[0].due == at(14, 0)
+
+    # Обед уже напомнили (идёт), режим сменили — обед доводим до конца, выходной обед не нужен
+    recs[1] = Existing(f"{MON}|lunch", at(14, 30), "pending", 1, True)
+    p = plan_sync(weekend, recs, at(14, 35))
+    assert f"{MON}|lunch" not in p.delete + p.cancel
+    assert p.create_now == [] and {i.task.id for i in p.create_skipped} == {"wk_breakfast", "wk_lunch"}
+
+    # Вернули режим обратно: отменённая (но начатая) задача оживает, пустые следы удаляются
+    weekday = instances_for_day(cfg, MON)
+    recs = [
+        Existing(f"{MON}|lunch", at(14, 30), "skipped", 1, True),
+        Existing(ids["wk_lunch"], at(13, 30), "skipped", 0, True),
+    ]
+    p = plan_sync(weekday, recs, at(14, 40))
+    assert p.revive == [f"{MON}|lunch"] and p.delete == [ids["wk_lunch"]]
+
+    # Задачу убрали из конфига — отменяем, даже если её время прошло
+    recs = [Existing(f"{MON}|gone", at(9, 0), "pending", 1, True, known=False)]
+    assert plan_sync(weekday, recs, at(10, 0)).cancel == [f"{MON}|gone"]
 
 
 def test_store_members(cfg):

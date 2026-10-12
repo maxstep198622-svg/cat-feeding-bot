@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS instances (
     done_at       TEXT,
     done_by       TEXT,
     followup_sent_at TEXT,
-    leftovers     TEXT
+    leftovers     TEXT,
+    adjusted      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS instances_day ON instances(day);
 CREATE TABLE IF NOT EXISTS messages (
@@ -158,41 +159,34 @@ class Store:
 
     # --- задачи ---
 
-    def ensure_instances(self, instances: list[Instance], skipped: set[str] = frozenset()) -> None:
-        """Создаёт задачи дня. Задачи из `skipped` сразу помечаются как ненужные (режим сменили, время прошло)."""
+    def ensure_instances(self, instances: list[Instance], status: str = "pending", adjusted: bool = False) -> None:
+        """Создаёт задачи дня (существующие не трогает). adjusted — время сдвинуто вручную, план его не перезапишет."""
         with self.db:
             self.db.executemany(
-                "INSERT OR IGNORE INTO instances(id, task_id, day, due_at, assignee, status) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO instances(id, task_id, day, due_at, assignee, status, adjusted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (i.id, i.task.id, i.day.isoformat(), i.due.isoformat(), i.task.primary,
-                     "skipped" if i.id in skipped else "pending")
+                    (i.id, i.task.id, i.day.isoformat(), i.due.isoformat(), i.task.primary, status, int(adjusted))
                     for i in instances
                 ],
             )
+
+    def delete_instances(self, ids: list[str]) -> None:
+        with self.db:
+            self.db.executemany("DELETE FROM instances WHERE id = ?", [(i,) for i in ids])
+            self.db.executemany("DELETE FROM messages WHERE instance_id = ?", [(i,) for i in ids])
+
+    def set_status(self, ids: list[str], status: str) -> None:
+        with self.db:
+            self.db.executemany("UPDATE instances SET status = ? WHERE id = ?", [(status, i) for i in ids])
 
     def sync_due(self, instances: list[Instance]) -> None:
         """Обновляет время ещё не начатых задач (если поменяли режим дня или конфиг)."""
         with self.db:
             self.db.executemany(
-                "UPDATE instances SET due_at = ? WHERE id = ? AND status = 'pending' AND sent_count = 0",
+                "UPDATE instances SET due_at = ? WHERE id = ? AND status = 'pending' AND sent_count = 0 AND adjusted = 0",
                 [(i.due.isoformat(), i.id) for i in instances],
             )
-
-    def drop_unplanned(self, day: date, keep_ids: set[str]) -> list[str]:
-        """Задачи этого дня, которых больше нет в плане (сменили режим или конфиг): неначатые удаляет,
-        начатые помечает skipped. Возвращает id начатых — их сообщения нужно закрыть."""
-        rows = self.db.execute(
-            "SELECT id, sent_count FROM instances WHERE day = ? AND status = 'pending'", (day.isoformat(),)
-        ).fetchall()
-        stale = [r for r in rows if r["id"] not in keep_ids]
-        started = [r["id"] for r in stale if r["sent_count"] > 0]
-        if stale:
-            with self.db:
-                self.db.executemany(
-                    "DELETE FROM instances WHERE id = ? AND sent_count = 0", [(r["id"],) for r in stale]
-                )
-                self.db.executemany("UPDATE instances SET status = 'skipped' WHERE id = ?", [(i,) for i in started])
-        return started
 
     def get(self, instance_id: str) -> Record | None:
         row = self.db.execute("SELECT * FROM instances WHERE id = ?", (instance_id,)).fetchone()

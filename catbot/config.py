@@ -261,7 +261,7 @@ REMINDER_BOOLS = {"notify_parents_on_child_done", "notify_parents_on_home"}
 REMINDER_KEYS = set(REMINDER_INTS) | REMINDER_BOOLS | {"daily_report"}
 ENERGY_FACTORS = {"kitten_0_4m", "kitten_4_6m", "kitten_6_9m", "kitten_9_12m", "adult_intact", "adult_neutered"}
 ENERGY_KEYS = ENERGY_FACTORS | {"kitten_spay_cut", "spay_recovery_days"}
-FOOD_KCAL_RANGE = {"dry": (250, 600), "wet": (40, 200)}
+FOOD_KCAL_RANGE = {"dry": (200, 650), "wet": (20, 300)}  # перекрываются: сырые и «свежие» корма бывают 200–250
 
 
 def _check_keys(d: dict, allowed: set[str], where: str) -> None:

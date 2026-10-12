@@ -60,15 +60,43 @@ def test_mode_switch_midday_does_not_revive_past_slots(env):
     assert not any("пора покормить" in t or "ещё не отмечено" in t or "так и не отмечено" in t for t in new)
 
 
-def test_mode_switch_cancels_started_task_and_closes_messages(env):
+def test_mode_switch_during_feeding_keeps_it_going(env):
     tick(env, 14, 30)  # обед отправлен Тасе
     env.clock.set(14, 35)
     press(env, "tanya", f"mode|{MON}:weekend")
-    assert env.store.get(lunch_id()).status == "skipped"
-    assert any("сменили режим" in e[2] for e in env.fake.edited)
-    before = len(env.fake.sent)
-    tick(env, 15, 10)  # ни повторов, ни эскалации по отменённой задаче
-    assert not any("Обед" in m.text and "14:30" in m.text for m in env.fake.sent[before:])
+    assert env.store.get(lunch_id()).status == "pending"
+    tick(env, 14, 40)
+    assert any("Напоминаю" in m.text and "Обед" in m.text for m in to(env, "tasya"))
+    # туда-обратно — ничего не теряется
+    env.clock.set(14, 41)
+    press(env, "tanya", f"mode|{MON}:auto")
+    assert env.store.get(lunch_id()).status == "pending"
+    env.clock.set(14, 45)
+    press(env, "tasya", f"done|{lunch_id()}")
+    assert env.store.get(lunch_id()).status == "done"
+
+
+def test_mode_switch_before_lunch_reminds_new_lunch_now(env):
+    tick(env, 7, 45)
+    env.clock.set(7, 50)
+    press(env, "papa", f"done|{MON}|breakfast")
+    env.clock.set(14, 0)
+    press(env, "tanya", f"mode|{MON}:weekend")  # выходной обед был в 13:30, а будний ещё не наступил
+    tick(env, 14, 0)
+    msgs = [m for m in to(env, "tasya") if "Обед" in m.text and "пора покормить" in m.text]
+    assert len(msgs) == 1 and "14:00" in msgs[0].text
+    assert not any("ещё не отмечено" in m.text for m in to(env, "tanya"))  # без ложной эскалации
+
+
+def test_mode_preset_for_tomorrow_then_reverted(env):
+    tick(env, 20, 0)
+    tomorrow = MON + timedelta(days=1)
+    env.clock.set(20, 0)
+    press(env, "tanya", f"mode|{tomorrow}:weekend")
+    env.clock.set(8, 0, day=tomorrow)
+    press(env, "tanya", f"mode|{tomorrow}:auto")
+    tick(env, 8, 0, day=tomorrow)
+    assert any("Завтрак" in m.text and "пора покормить" in m.text for m in to(env, "papa"))
 
 
 def test_done_task_from_old_mode_still_gets_followup(raw):
@@ -211,7 +239,7 @@ def test_done_rejected_for_other_day_and_far_future(env):
     q = press(env, "tasya", f"done|{lunch_id()}")  # обед в 14:30 — до него больше 3 часов
     assert "рано" in q.answers[0]
     tick(env, 14, 30)
-    env.clock.set(9, 0, day=MON + timedelta(days=1))
+    env.clock.set(9, 0, day=MON + timedelta(days=2))  # вчерашние ещё можно, позавчерашние — нет
     q = press(env, "tasya", f"done|{lunch_id()}")
     assert "12.10" in q.answers[0]
     assert env.store.get(lunch_id()).status != "done"
@@ -247,6 +275,7 @@ def test_today_survives_removed_task(env, raw):
     msg = run_cmd(env, "tasya", env.bot.cmd_home)
     assert msg.replies
     assert env.store.get(lunch_id()).status == "skipped"
+    assert any("сменился план" in e[2] for e in env.fake.edited)
 
 
 # --- возраст и вес ---
@@ -355,3 +384,67 @@ def test_toml_syntax_error_is_config_error(tmp_path):
     p.write_text('join_code = "abcd"\nweight_kg = 1,5\n', encoding="utf-8")
     with pytest.raises(ConfigError, match="через точку"):
         load_config(p)
+
+
+def test_yesterday_late_task_buttons_work_after_midnight(raw):
+    raw["tasks"][2]["time"] = "23:40"
+    cfg = parse_config(raw)
+    store = Store(":memory:")
+    bot = CatBot(cfg, store)
+    clock = Clock(cfg.timezone)
+    bot.now = lambda: clock.value
+    e = SimpleNamespace(bot=bot, store=store, clock=clock, app=SimpleNamespace(bot=FakeBot()))
+    e.fake = e.app.bot
+    for m, c in CHATS.items():
+        store.bind_member(m, c, None, clock.set(7, 0))
+    tick(e, 23, 40)
+    clock.set(0, 5, day=MON + timedelta(days=1))
+    q = press(e, "tasya", f"done|{MON}|dinner")
+    assert store.get(f"{MON}|dinner").status == "done"
+
+
+def test_missed_notice_has_working_done_button(env):
+    for hh, mm in [(14, 30), (14, 40), (14, 50), (15, 0), (17, 0)]:
+        tick(env, hh, mm)
+    notice = [m for m in to(env, "papa") if "так и не отмечено" in m.text and "Обед" in m.text][0]
+    assert [b.callback_data for row in notice.markup.inline_keyboard for b in row] == [f"done|{lunch_id()}"]
+    assert (CHATS["papa"], notice.message_id) not in [(c, mid) for c, mid, _ in env.fake.edited]
+    env.clock.set(17, 5)
+    press(env, "papa", f"done|{lunch_id()}")
+    assert env.store.get(lunch_id()).status == "done"
+
+
+def test_no_double_escalation_when_first_send_is_late(env):
+    env.store.unbind_chat(CHATS["tasya"])
+    tick(env, 15, 5)  # бот поднялся поздно: и напоминание, и эскалация в одном тике
+    assert len([m for m in to(env, "tanya") if "ещё не отмечено" in m.text]) == 1
+
+
+def test_stale_done_button_mentions_date(env):
+    tick(env, 14, 30)
+    env.clock.set(14, 35)
+    press(env, "tasya", f"done|{lunch_id()}")
+    env.clock.set(14, 35, day=MON + timedelta(days=1))
+    q = press(env, "tasya", f"done|{lunch_id()}")
+    assert "12.10" in q.answers[0]
+
+
+def test_weight_exact_name_wins_over_prefix(raw):
+    raw["cats"].append({"id": "luna2", "name": "Младшая-2", "birth_date": "2026-07-10", "weight_kg": 1.0})
+    cfg = parse_config(raw)
+    store = Store(":memory:")
+    bot = CatBot(cfg, store)
+    clock = Clock(cfg.timezone)
+    bot.now = lambda: clock.value
+    e = SimpleNamespace(bot=bot, store=store, clock=clock, app=SimpleNamespace(bot=FakeBot()))
+    e.fake = e.app.bot
+    store.bind_member("papa", 1, None, clock.set(10, 0))
+    run_cmd(e, "papa", bot.cmd_weight, ["Младшая", "1.6"])
+    assert store.latest_weight("kitten") == 1.6
+
+
+def test_food_kcal_ranges_overlap(raw):
+    raw["foods"][0].update(kcal_per_100g=210, kind="wet")
+    parse_config(raw)
+    raw["foods"][0].update(kcal_per_100g=210, kind="dry")
+    parse_config(raw)

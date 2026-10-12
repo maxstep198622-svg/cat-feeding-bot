@@ -111,16 +111,19 @@ def done_stamp(task: Task, due: datetime, who: str, at: datetime) -> str:
     return f"✅ <b>{escape(task.name)}</b> ({hm(due)}) — сделано: {escape(who)}, {hm(at)}"
 
 
-def already_done(who: str, at: datetime, kind: str) -> str:
+def already_done(who: str, at: datetime, kind: str, day: date | None = None, today: date | None = None) -> str:
+    when = hm(at) if day is None or day == today else f"{day.strftime('%d.%m')} в {hm(at)}"
     if kind == "feeding":
-        return f"Уже покормили: {who}, {hm(at)}. Второй раз кормить не нужно 🙂"
-    return f"Уже сделано: {who}, {hm(at)}."
+        if day is not None and day != today:
+            return f"Это кнопка за {day.strftime('%d.%m')}: тогда покормил(а) {who} в {hm(at)}."
+        return f"Уже покормили: {who}, {when}. Второй раз кормить не нужно 🙂"
+    return f"Уже сделано: {who}, {when}."
 
 
 def missed(task: Task, due: datetime, assignee: str) -> str:
     return (
         f"❌ <b>{escape(task.name)}</b> ({hm(due)}) так и не отмечено (ответственный: {escape(assignee)}). "
-        "Если на самом деле всё сделано — отметьте в /today."
+        "Если на самом деле всё сделано — нажмите кнопку ниже."
     )
 
 

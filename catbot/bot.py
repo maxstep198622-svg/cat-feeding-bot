@@ -22,7 +22,17 @@ from telegram.ext import (
 from . import texts
 from .config import Config, Task
 from .ration import Need, daily_need, due_milestones
-from .scheduler import Action, Instance, day_mode, decide, home_pull, instances_for_day, next_assignee
+from .scheduler import (
+    Action,
+    Existing,
+    Instance,
+    day_mode,
+    decide,
+    home_pull,
+    instances_for_day,
+    next_assignee,
+    plan_sync,
+)
 from .storage import Record, Store
 
 log = logging.getLogger(__name__)
@@ -94,19 +104,24 @@ class CatBot:
         return self.instance_of(rec) if rec else None
 
     async def sync_day(self, app: Application, day: date, now: datetime) -> tuple[str, list[Instance]]:
-        """Приводит задачи дня в базе к текущему плану (режим дня, конфиг).
-
-        Если день уже начался, задачи нового режима, время которых прошло, не «воскрешаем» —
-        иначе после смены режима бот предложил бы покормить второй раз."""
+        """Приводит задачи дня в базе к текущему плану (режим дня, конфиг) — см. scheduler.plan_sync."""
         override = self.store.day_mode(day)
         mode = day_mode(self.cfg, day, override)
         insts = instances_for_day(self.cfg, day, override)
-        existing = {r.id for r in self.store.for_day(day)}
-        skipped = {i.id for i in insts if i.id not in existing and i.due <= now} if existing else set()
-        self.store.ensure_instances(insts, skipped)
+        records = [
+            Existing(r.id, r.due_at, r.status, r.sent_count, bool(t and t.kind == "feeding"), t is not None)
+            for r, t in ((r, self.task_of(r)) for r in self.store.for_day(day))
+        ]
+        plan = plan_sync(insts, records, now)
+        self.store.delete_instances(plan.delete)
+        self.store.set_status(plan.revive, "pending")
+        self.store.set_status(plan.cancel, "skipped")
+        self.store.ensure_instances(plan.create)
+        self.store.ensure_instances(plan.create_now, adjusted=True)
+        self.store.ensure_instances(plan.create_skipped, status="skipped")
         self.store.sync_due(insts)
-        for instance_id in self.store.drop_unplanned(day, {i.id for i in insts}):
-            await self.close_messages(app, instance_id, "⏭ Отменено: сменили режим дня.")
+        for instance_id in plan.cancel:
+            await self.close_messages(app, instance_id, "⏭ Отменено: сменился план дня.")
         return mode, insts
 
     def paused(self) -> bool:
@@ -229,6 +244,15 @@ class CatBot:
 
     async def perform(self, app: Application, action: Action, rec: Record, needs: dict[str, Need], now: datetime) -> None:
         inst = action.instance
+        # Состояние могло измениться за этот же тик (эскалация из запасного пути, «Готово» по кнопке).
+        fresh = self.store.get(inst.id)
+        if fresh is None:
+            return
+        if action.kind in ("remind", "escalate", "miss") and fresh.status != "pending":
+            return
+        if action.kind == "escalate" and fresh.escalated_at is not None:
+            return
+        rec = fresh
         assignee = rec.assignee
         if action.kind == "remind":
             text = texts.reminder(self.cfg, inst, self.name(assignee), needs, action.repeat)
@@ -261,9 +285,14 @@ class CatBot:
         elif action.kind == "followup_skip":
             self.store.mark_followup(inst.id, now)
         elif action.kind == "miss":
-            results = await self.send_parents(app, texts.missed(inst.task, inst.due, self.name(assignee)), silent=True)
-            if settled(results) and self.store.mark_missed(inst.id):
-                await self.close_messages(app, inst.id, f"❌ <b>{texts.escape(inst.task.name)}</b> ({texts.hm(inst.due)}) — не отмечено")
+            # Сначала гасим старые напоминания, потом шлём уведомление с кнопкой «Готово» (её не гасить).
+            await self.close_messages(app, inst.id, f"❌ <b>{texts.escape(inst.task.name)}</b> ({texts.hm(inst.due)}) — не отмечено")
+            results = await self.send_parents(
+                app, texts.missed(inst.task, inst.due, self.name(assignee)), markup=self.done_keyboard(inst.id),
+                instance_id=inst.id, silent=True,
+            )
+            if settled(results):
+                self.store.mark_missed(inst.id)
 
     async def maybe_milestones(self, app: Application, now: datetime) -> None:
         if now.time() < MILESTONES_FROM:
@@ -434,15 +463,23 @@ class CatBot:
         else:
             await query.answer()
 
+    def actionable_day(self, rec: Record, now: datetime) -> bool:
+        """Сегодняшние задачи и вчерашние, которые бот ещё ведёт (поздний вечер, после полуночи)."""
+        return rec.day == now.date() or rec.day == now.date() - timedelta(days=1)
+
     async def on_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE, member_id: str, inst: Instance) -> None:
+        async with self.lock:
+            await self._on_done(update, context, member_id, inst)
+
+    async def _on_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE, member_id: str, inst: Instance) -> None:
         query = update.callback_query
         now = self.now()
         rec = self.store.get(inst.id)
         if rec.status == "done":
-            await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind), show_alert=True)
+            await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind, rec.day, now.date()), show_alert=True)
             await self.close_messages(context.application, inst.id, texts.done_stamp(inst.task, inst.due, self.name(rec.done_by), rec.done_at))
             return
-        if rec.day != now.date():
+        if not self.actionable_day(rec, now):
             await query.answer(f"Это кнопка за {rec.day.strftime('%d.%m')} — уже не актуально", show_alert=True)
             return
         if rec.status == "skipped":
@@ -453,7 +490,7 @@ class CatBot:
             return
         if not self.store.mark_done(inst.id, member_id, now):
             rec = self.store.get(inst.id)
-            await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind), show_alert=True)
+            await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind, rec.day, now.date()), show_alert=True)
             return
         stamp = texts.done_stamp(inst.task, inst.due, self.name(member_id), now)
         await self.close_messages(context.application, inst.id, stamp)
@@ -497,10 +534,11 @@ class CatBot:
     async def _check_own_pending(self, query, member_id: str, inst: Instance) -> Record | None:
         """Отложить или передать можно только свою, ещё не сделанную сегодняшнюю задачу."""
         rec = self.store.get(inst.id)
+        now = self.now()
         if rec.status == "done":
-            await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind), show_alert=True)
+            await query.answer(texts.already_done(self.name(rec.done_by), rec.done_at, inst.task.kind, rec.day, now.date()), show_alert=True)
             return None
-        if rec.status != "pending" or rec.day != self.now().date():
+        if rec.status != "pending" or not self.actionable_day(rec, now):
             await query.answer("Эта задача уже не актуальна", show_alert=True)
             return None
         if rec.assignee != member_id:
@@ -512,10 +550,11 @@ class CatBot:
 
     async def on_snooze(self, update: Update, member_id: str, inst: Instance) -> None:
         query = update.callback_query
-        if not await self._check_own_pending(query, member_id, inst):
-            return
-        minutes = self.cfg.reminders.snooze_min
-        self.store.snooze(inst.id, self.now() + timedelta(minutes=minutes))
+        async with self.lock:
+            if not await self._check_own_pending(query, member_id, inst):
+                return
+            minutes = self.cfg.reminders.snooze_min
+            self.store.snooze(inst.id, self.now() + timedelta(minutes=minutes))
         await query.answer(f"Хорошо, напомню через {minutes} мин ⏰")
 
     async def on_pass(self, update: Update, context: ContextTypes.DEFAULT_TYPE, member_id: str, inst: Instance) -> None:
@@ -672,7 +711,9 @@ class CatBot:
             await update.effective_message.reply_text(usage, parse_mode=ParseMode.HTML)
             return
         cat_query = " ".join(args[:-1]).lower()
-        matches = [c for c in self.cfg.cats if c.name.lower().startswith(cat_query) or c.id == cat_query]
+        matches = [c for c in self.cfg.cats if c.name.lower() == cat_query or c.id == cat_query]
+        if not matches:
+            matches = [c for c in self.cfg.cats if c.name.lower().startswith(cat_query)]
         try:
             kg = float(args[-1].replace(",", "."))
         except ValueError:
