@@ -2,7 +2,7 @@
 #
 # Установка (один раз):
 #   sudo useradd --system --home /opt/cat_bot --shell /usr/sbin/nologin catbot
-#   sudo git clone <репозиторий> /tmp/repo && sudo cp -r /tmp/repo/cat_bot /opt/cat_bot
+#   sudo git clone <адрес репозитория cat-feeding-bot> /opt/cat_bot
 #   cd /opt/cat_bot && sudo python3 -m venv .venv && sudo .venv/bin/pip install -r requirements.txt
 #   sudo cp config.example.toml config.toml && sudo nano config.toml      # вес, корма, join_code
 #   echo "CATBOT_TOKEN=123456:ABC..." | sudo tee .env && sudo chmod 600 .env

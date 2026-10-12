@@ -28,7 +28,7 @@ Telegram-бот для семьи: в нужное время напоминае
 1. **Создайте бота.** В Telegram напишите [@BotFather](https://t.me/BotFather): `/newbot`, затем имя, затем логин. Он пришлёт токен вида `123456:ABC...`.
 2. **Подготовьте конфиг:**
    ```bash
-   cd cat_bot
+   cd cat-feeding-bot
    cp config.example.toml config.toml
    ```
    В `config.toml` проверьте:
