@@ -19,10 +19,23 @@ esac
 cd "$APP_DIR"
 [ -f config.toml ] || die "Не найден файл настроек $APP_DIR/config.toml"
 
+# Сразу после покупки сервер сам ставит обновления и держит блокировку apt — ждём, а не падаем.
+apt_wait() {
+  local i
+  for i in $(seq 1 60); do
+    "$@" && return 0
+    echo "Сервер сейчас сам ставит обновления — жду 15 секунд и пробую снова…"
+    sleep 15
+  done
+  return 1
+}
+
 say "1/6 Устанавливаю Python…"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq python3 python3-venv curl >/dev/null
+apt_wait apt-get update -qq \
+  || die "Сервер уже 15 минут занят обновлениями. Выполните reboot, через минуту подключитесь снова и повторите установку."
+apt_wait apt-get install -y -qq -o DPkg::Lock::Timeout=600 python3 python3-venv curl git ca-certificates > /dev/null \
+  || die "Не удалось установить Python — текст ошибки выше. Пришлите его Claude."
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
   || die "Нужен Python 3.11 или новее. Переустановите сервер с Ubuntu 24.04."
 ok "$(python3 --version)"
@@ -78,7 +91,7 @@ umask 022
 
 say "5/6 Проверяю настройки…"
 CATBOT_JOIN_CODE="$CODE" .venv/bin/python -m catbot --check --config config.toml > /dev/null \
-  || die "В файле настроек ошибка — текст выше. Напишите её Claude, он поправит."
+  || die "В файле настроек ошибка — текст выше. Пришлите его Claude, он поправит."
 ok "Расписание в порядке"
 
 say "6/6 Запускаю бота как службу (он сам поднимется после перезагрузки сервера)…"
@@ -131,6 +144,6 @@ cat <<EOF
  «Запустить» и введите семейный код:  ${CODE}
 
  Обновить бота после правок:  bash ${APP_DIR}/deploy/update.sh
- Посмотреть, что с ботом:      systemctl status ${SERVICE}
+ Посмотреть, что с ботом:      systemctl status ${SERVICE} --no-pager
 ────────────────────────────────────────────────────────
 EOF

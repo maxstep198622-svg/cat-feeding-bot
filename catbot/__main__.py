@@ -34,7 +34,7 @@ def check(config_path: str, day: date | None) -> int:
     print(f"Конфиг в порядке: {len(cfg.members)} участника(ов), {len(cfg.cats)} кошки, {len(cfg.tasks)} задач.")
     warnings = check_shares(cfg)
     for w in warnings:
-        print(f"⚠️  {w}")
+        print(f"⚠️  {w}", file=sys.stderr)
     needs = {c.id: daily_need(cfg, c, day) for c in cfg.cats}
     mode = day_mode(cfg, day)
     print()

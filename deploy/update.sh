@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Обновление бота «Стефа и Фая»: скачать новую версию с GitHub и перезапустить.
 #   bash /opt/stefa-i-faya/deploy/update.sh
+# Если новая версия не проходит проверку, скрипт возвращает прежнюю — бот не останется сломанным.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,19 +17,26 @@ cd "$APP_DIR"
 
 say "Скачиваю новую версию…"
 BEFORE="$(git rev-parse HEAD)"
-git pull --ff-only || die "Не удалось скачать обновление. Если просит логин — выполните: gh auth login -h github.com -p https -w && gh auth setup-git"
+rollback() {
+  git reset -q --keep "$BEFORE" && .venv/bin/pip install -q -r requirements.txt || true
+}
+GIT_TERMINAL_PROMPT=0 git pull -q --ff-only \
+  || die "Не удалось скачать обновление — текст ошибки выше. Пришлите его Claude."
 AFTER="$(git rev-parse HEAD)"
 if [ "$BEFORE" = "$AFTER" ]; then
   ok "Обновлений нет — уже последняя версия"
 else
-  git log --format='  • %s' "${BEFORE}..${AFTER}"
+  git --no-pager log --format='  • %s' "${BEFORE}..${AFTER}"
 fi
 
 say "Обновляю библиотеки и проверяю настройки…"
-.venv/bin/pip install -q -r requirements.txt
-CATBOT_JOIN_CODE="$(sed -n 's/^CATBOT_JOIN_CODE=//p' .env | head -n 1)" \
-  .venv/bin/python -m catbot --check --config config.toml > /dev/null \
-  || die "В новых настройках ошибка — бот НЕ перезапущен и работает по-старому. Пришлите текст ошибки Claude."
+.venv/bin/pip install -q -r requirements.txt \
+  || { rollback; die "Не удалось поставить библиотеки — вернул прежнюю версию, бот работает по-старому. Пришлите текст выше Claude."; }
+if ! CATBOT_JOIN_CODE="$(sed -n 's/^CATBOT_JOIN_CODE=//p' .env | head -n 1)" \
+     .venv/bin/python -m catbot --check --config config.toml > /dev/null; then
+  rollback
+  die "В новых настройках ошибка — текст выше. Я вернул прежнюю версию, бот работает по-старому. Пришлите текст Claude."
+fi
 ok "Настройки в порядке"
 
 say "Перезапускаю бота…"
