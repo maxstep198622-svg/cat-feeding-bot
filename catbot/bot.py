@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
@@ -21,13 +21,24 @@ from telegram.ext import (
 from . import texts
 from .config import Config
 from .ration import Need, daily_need, due_milestones
-from .scheduler import Action, Instance, day_mode, decide, instances_for_day, next_assignee
+from .scheduler import Action, Instance, day_mode, decide, home_pull, instances_for_day, next_assignee
 from .storage import Store
 
 log = logging.getLogger(__name__)
 
+BTN_HOME = "🏠 Я дома"
+BTN_TODAY = "📋 Сегодня"
+BTN_ALERT = "🚨 Что-то не так"
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton(BTN_HOME), KeyboardButton(BTN_TODAY)], [KeyboardButton(BTN_ALERT)]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
 COMMANDS = [
     BotCommand("today", "План на сегодня"),
+    BotCommand("home", "Я дома — что нужно сделать?"),
+    BotCommand("alert", "Что-то не так с кошкой — сообщить родителям"),
     BotCommand("ration", "Порции и расчёт нормы"),
     BotCommand("weight", "Записать вес кошки"),
     BotCommand("plan", "Правила кормления"),
@@ -87,6 +98,14 @@ class CatBot:
                     InlineKeyboardButton("🙅 Не могу", callback_data=f"pass|{instance_id}"),
                 ],
             ]
+        )
+
+    def leftovers_keyboard(self, instance_id: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("👍 Всё съели", callback_data=f"left|ok|{instance_id}"),
+                InlineKeyboardButton("🍽 Осталось много", callback_data=f"left|many|{instance_id}"),
+            ]]
         )
 
     def member_of(self, update: Update) -> str | None:
@@ -170,6 +189,13 @@ class CatBot:
             for member_id in targets:
                 await self.send(app, member_id, text, self.keyboard(inst.id), inst.id)
             self.store.mark_escalated(inst.id, now)
+        elif action.kind == "followup":
+            self.store.mark_followup(inst.id, now)
+            rec = self.store.get(inst.id)
+            who = rec.done_by if rec and rec.done_by else assignee
+            await self.send(app, who, texts.followup(inst, self.name(who)), self.leftovers_keyboard(inst.id))
+        elif action.kind == "followup_skip":
+            self.store.mark_followup(inst.id, now)
         elif action.kind == "miss":
             if self.store.mark_missed(inst.id):
                 await self.close_messages(app, inst.id, f"❌ <b>{texts.escape(inst.task.name)}</b> ({texts.hm(inst.due)}) — не отмечено")
@@ -228,7 +254,9 @@ class CatBot:
         member_id = self.member_of(update)
         if member_id:
             await update.effective_message.reply_text(
-                f"Привет, {self.name(member_id)}! Я уже знаю тебя. Список команд — /help", parse_mode=ParseMode.HTML
+                f"Привет, {texts.escape(self.name(member_id))}! Я уже знаю тебя. Список команд — /help",
+                parse_mode=ParseMode.HTML,
+                reply_markup=MAIN_KEYBOARD,
             )
             return
         if context.args and context.args[0] == self.cfg.join_code:
@@ -238,11 +266,22 @@ class CatBot:
         await update.effective_message.reply_text("Привет! Я кошачий бот 🐾\nНапиши семейный код, чтобы подключиться.")
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = (update.effective_message.text or "").strip()
+        if self.member_of(update):
+            if text == BTN_HOME:
+                await self.cmd_home(update, context)
+            elif text == BTN_TODAY:
+                await self.cmd_today(update, context)
+            elif text == BTN_ALERT:
+                await self.cmd_alert(update, context)
+            else:
+                await update.effective_message.reply_text("Не понял 🙂 Кнопки внизу или /help", reply_markup=MAIN_KEYBOARD)
+            return
         if not context.user_data.get("awaiting_code"):
             if not self.member_of(update):
                 await update.effective_message.reply_text("Чтобы подключиться, отправь /start")
             return
-        if update.effective_message.text.strip() == self.cfg.join_code:
+        if text == self.cfg.join_code:
             context.user_data.pop("awaiting_code", None)
             await self.ask_who(update)
         else:
@@ -270,6 +309,9 @@ class CatBot:
             f"Готово, {texts.escape(member.name)}! Буду присылать напоминания сюда.\n\n{texts.HELP}",
             parse_mode=ParseMode.HTML,
         )
+        await context.application.bot.send_message(
+            update.effective_chat.id, "Кнопки внизу всегда под рукой 👇", reply_markup=MAIN_KEYBOARD
+        )
         if previous_chat and previous_chat != update.effective_chat.id:
             await self.send_parents(
                 context.application, f"ℹ️ {texts.escape(member.name)} подключился(-ась) к боту с другого аккаунта.", {member_id}
@@ -289,6 +331,17 @@ class CatBot:
             return
         if action == "mode":
             await self.on_mode(update, context, member_id, payload)
+            return
+        if action == "alert":
+            await self.on_alert(update, context, member_id, payload)
+            return
+        if action == "left":
+            value, _, payload = payload.partition("|")
+            inst = self.instance(payload)
+            if inst is None:
+                await query.answer("Эта задача уже не актуальна", show_alert=True)
+                return
+            await self.on_leftovers(update, context, member_id, inst, value)
             return
         inst = self.instance(payload)
         if inst is None:
@@ -321,6 +374,31 @@ class CatBot:
             await query.answer(texts.PRAISE[n % len(texts.PRAISE)], show_alert=True)
             if self.cfg.reminders.notify_parents_on_child_done:
                 await self.send_parents(context.application, stamp)
+
+    async def on_leftovers(self, update: Update, context: ContextTypes.DEFAULT_TYPE, member_id: str, inst: Instance, value: str) -> None:
+        query = update.callback_query
+        if value not in ("ok", "many"):
+            await query.answer()
+            return
+        self.store.set_leftovers(inst.id, value)
+        if value == "ok":
+            await query.answer("Отлично! 👍")
+            await self._edit_query(query, f"👍 {texts.escape(inst.task.name)}: всё съели, остатки убраны.")
+            return
+        await query.answer("Записал. Родителям сообщу.")
+        await self._edit_query(query, f"🍽 {texts.escape(inst.task.name)}: осталось много — остатки выброшены, родителям сообщил.")
+        followup_tasks = {t.id for t in self.cfg.tasks if t.followup}
+        prev = self.store.previous_followup(inst.id, followup_tasks)
+        twice = prev is not None and prev.leftovers == "many"
+        await self.send_parents(
+            context.application, texts.leftovers_alert(inst, self.name(member_id), twice), exclude={member_id}
+        )
+
+    async def _edit_query(self, query, text: str) -> None:
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+        except TelegramError:
+            pass
 
     async def on_snooze(self, update: Update, member_id: str, inst: Instance) -> None:
         minutes = self.cfg.reminders.snooze_min
@@ -359,7 +437,83 @@ class CatBot:
         return member_id
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text(texts.HELP, parse_mode=ParseMode.HTML)
+        markup = MAIN_KEYBOARD if self.member_of(update) else None
+        await update.effective_message.reply_text(texts.HELP, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def cmd_home(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        member_id = await self.guard(update)
+        if not member_id:
+            return
+        now = self.now()
+        app = context.application
+        if self.cfg.reminders.notify_parents_on_home and not self.is_parent(member_id):
+            await self.send_parents(app, f"🏠 {texts.escape(self.name(member_id))} дома ({texts.hm(now)})", exclude={member_id})
+        if self.paused():
+            await update.effective_message.reply_text("Привет! 🏠 Напоминания сейчас на паузе.")
+            return
+        _, insts = self.today_plan(now.date())
+        needs = self.needs(now.date())
+        pulled = []
+        for inst in insts:
+            rec = self.store.get(inst.id)
+            if rec and home_pull(self.cfg, Instance(inst.id, inst.task, inst.day, rec.due_at), rec.state(), member_id, now):
+                inst = Instance(inst.id, inst.task, inst.day, rec.due_at)
+                if await self.send(app, member_id, texts.reminder(self.cfg, inst, self.name(member_id), needs, 0), self.keyboard(inst.id), inst.id):
+                    self.store.mark_sent(inst.id, now)
+                    pulled.append(inst)
+        if pulled:
+            return
+        waiting = [
+            r for r in self.store.for_day(now.date())
+            if r.status == "pending" and r.assignee == member_id and r.sent_count > 0
+        ]
+        if waiting:
+            names = ", ".join(texts.escape(self.cfg.task(r.task_id).name) for r in waiting)
+            await update.effective_message.reply_text(f"Привет! 🏠 Тебя ждёт: {names}. Напоминание выше ⬆️", parse_mode=ParseMode.HTML)
+            return
+        upcoming = [r for r in self.store.for_day(now.date()) if r.status == "pending" and r.due_at > now]
+        if upcoming:
+            r = upcoming[0]
+            await update.effective_message.reply_text(
+                f"Привет! 🏠 Пока ничего не нужно. Следующее: {texts.hm(r.due_at)} "
+                f"{texts.escape(self.cfg.task(r.task_id).name)} ({texts.escape(self.name(r.assignee))}).",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.effective_message.reply_text("Привет! 🏠 На сегодня всё сделано или больше ничего нет.")
+
+    async def cmd_alert(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self.guard(update):
+            return
+        rows = [[InlineKeyboardButton(f"{c.emoji} {c.name}", callback_data=f"alert|{c.id}")] for c in self.cfg.cats]
+        rows.append([InlineKeyboardButton("Обе", callback_data="alert|*")])
+        await update.effective_message.reply_text("С кем что-то не так?", reply_markup=InlineKeyboardMarkup(rows))
+
+    async def on_alert(self, update: Update, context: ContextTypes.DEFAULT_TYPE, member_id: str, payload: str) -> None:
+        query = update.callback_query
+        cat_id, _, symptom = payload.partition("|")
+        if cat_id != "*" and cat_id not in {c.id for c in self.cfg.cats}:
+            await query.answer()
+            return
+        if not symptom:
+            rows = [
+                [InlineKeyboardButton(label, callback_data=f"alert|{cat_id}|{key}")]
+                for key, label in texts.SYMPTOMS.items()
+            ]
+            await query.answer()
+            await query.edit_message_text("Что случилось?", reply_markup=InlineKeyboardMarkup(rows))
+            return
+        if symptom not in texts.SYMPTOMS:
+            await query.answer()
+            return
+        cat_name = "Обе кошки" if cat_id == "*" else self.cfg.cat(cat_id).name
+        text = texts.alert(self.name(member_id), cat_name, texts.SYMPTOMS[symptom], self.now())
+        sent = await self.send_parents(context.application, text, exclude={member_id})
+        await query.answer()
+        reply = "Родителям сообщил 📨 Если кошке совсем плохо — сразу позвони маме или папе." if sent else (
+            "Записал. Других взрослых в боте нет — звони ветеринару, если кошке плохо."
+        )
+        await self._edit_query(query, reply)
 
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self.guard(update):
@@ -505,6 +659,8 @@ def build_application(token: str, cfg: Config, store: Store, plan_text: str = ""
     app.add_handler(CommandHandler("start", bot.cmd_start))
     app.add_handler(CommandHandler("help", bot.cmd_help))
     app.add_handler(CommandHandler("today", bot.cmd_today))
+    app.add_handler(CommandHandler("home", bot.cmd_home))
+    app.add_handler(CommandHandler("alert", bot.cmd_alert))
     app.add_handler(CommandHandler("ration", bot.cmd_ration))
     app.add_handler(CommandHandler("weight", bot.cmd_weight))
     app.add_handler(CommandHandler("plan", bot.cmd_plan))

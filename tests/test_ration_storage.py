@@ -17,12 +17,52 @@ def test_rer():
 def test_stages(cfg):
     kitten, adult = cfg.cats
     n = daily_need(cfg, kitten, MON)
-    assert n.stage == "котёнок до 4 месяцев" and n.factor == cfg.energy.kitten_under_4m
-    assert daily_need(cfg, kitten, date(2026, 12, 1)).stage == "котёнок 4–12 месяцев"
+    assert n.stage == "котёнок до 4 месяцев" and n.factor == 2.5
+    assert n.kcal == pytest.approx(rer(1.5) * 2.5)  # ≈ 237 ккал
+    assert n.note == ""  # 158 ккал/кг — в коридоре 150–220
+    assert daily_need(cfg, kitten, date(2026, 12, 1)).factor == cfg.energy.kitten_4_6m
+    assert daily_need(cfg, kitten, date(2027, 2, 1)).factor == cfg.energy.kitten_6_9m
+    assert daily_need(cfg, kitten, date(2027, 5, 1)).factor == cfg.energy.kitten_9_12m
     assert daily_need(cfg, kitten, date(2027, 8, 1)).stage == "взрослая нестерилизованная"
     a = daily_need(cfg, adult, MON)
     assert a.stage == "взрослая стерилизованная"
     assert a.kcal == pytest.approx(rer(4) * cfg.energy.adult_neutered)
+
+
+def test_kitten_spay_cut_after_recovery(raw):
+    from catbot.config import parse_config
+
+    raw["cats"][0].update(neutered=True, neutered_on="2026-11-20")
+    cfg = parse_config(raw)
+    kitten = cfg.cats[0]
+    before = daily_need(cfg, kitten, date(2026, 11, 19))
+    recovering = daily_need(cfg, kitten, date(2026, 11, 25))
+    after = daily_need(cfg, kitten, date(2026, 12, 4))
+    assert before.factor == recovering.factor == cfg.energy.kitten_4_6m
+    assert "восстановление" in recovering.stage
+    assert after.factor == pytest.approx(cfg.energy.kitten_4_6m * 0.9)
+
+
+def test_adult_uses_ideal_weight_and_sanity_note(raw):
+    from catbot.config import parse_config
+
+    raw["cats"][1]["ideal_weight_kg"] = 3.6
+    raw["cats"][0]["weight_kg"] = 3.0  # слишком много для 3 месяцев: 133 ккал/кг
+    cfg = parse_config(raw)
+    a = daily_need(cfg, cfg.cats[1], MON, weight_kg=4.4)
+    assert a.weight_kg == 3.6 and a.kcal == pytest.approx(rer(3.6) * cfg.energy.adult_neutered)
+    assert "коридор" in daily_need(cfg, cfg.cats[0], MON).note
+
+
+def test_milestones(cfg):
+    from catbot.ration import add_months, due_milestones
+
+    kitten = cfg.cats[0]  # родилась 2026-07-10
+    assert add_months(date(2026, 8, 31), 6) == date(2027, 2, 28)
+    assert due_milestones(kitten, date(2026, 11, 9)) == []
+    assert due_milestones(kitten, date(2026, 11, 10)) == [("4m", date(2026, 11, 10))]
+    assert due_milestones(kitten, date(2026, 11, 16)) == [("4m", date(2026, 11, 10))]
+    assert due_milestones(kitten, date(2026, 11, 17)) == []
 
 
 def test_manual_kcal_and_weight_override(raw):
@@ -33,7 +73,7 @@ def test_manual_kcal_and_weight_override(raw):
     n = daily_need(cfg, cfg.cats[1], MON)
     assert n.manual and n.kcal == 200
     heavier = daily_need(cfg, cfg.cats[0], MON, weight_kg=2.0)
-    assert heavier.weight_kg == 2.0 and heavier.kcal == pytest.approx(rer(2.0) * cfg.energy.kitten_under_4m)
+    assert heavier.weight_kg == 2.0 and heavier.kcal == pytest.approx(rer(2.0) * cfg.energy.kitten_0_4m)
 
 
 def test_portion_grams(cfg):

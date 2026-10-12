@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS instances (
     snoozed_until TEXT,
     escalated_at  TEXT,
     done_at       TEXT,
-    done_by       TEXT
+    done_by       TEXT,
+    followup_sent_at TEXT,
+    leftovers     TEXT
 );
 CREATE INDEX IF NOT EXISTS instances_day ON instances(day);
 CREATE TABLE IF NOT EXISTS messages (
@@ -77,6 +79,8 @@ class Record:
     escalated_at: datetime | None
     done_at: datetime | None
     done_by: str | None
+    followup_sent_at: datetime | None = None
+    leftovers: str | None = None
 
     def state(self) -> State:
         return State(
@@ -86,6 +90,8 @@ class Record:
             last_sent_at=self.last_sent_at,
             snoozed_until=self.snoozed_until,
             escalated_at=self.escalated_at,
+            done_at=self.done_at,
+            followup_sent_at=self.followup_sent_at,
         )
 
 
@@ -103,6 +109,8 @@ def _record(row: sqlite3.Row) -> Record:
         escalated_at=_dt(row["escalated_at"]),
         done_at=_dt(row["done_at"]),
         done_by=row["done_by"],
+        followup_sent_at=_dt(row["followup_sent_at"]),
+        leftovers=row["leftovers"],
     )
 
 
@@ -221,6 +229,27 @@ class Store:
                 (now.isoformat(), member_id, instance_id),
             )
         return cur.rowcount == 1
+
+    def mark_followup(self, instance_id: str, now: datetime) -> None:
+        with self.db:
+            self.db.execute("UPDATE instances SET followup_sent_at = ? WHERE id = ?", (now.isoformat(), instance_id))
+
+    def set_leftovers(self, instance_id: str, value: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE instances SET leftovers = ? WHERE id = ?", (value, instance_id))
+
+    def previous_followup(self, instance_id: str, task_ids: set[str]) -> Record | None:
+        """Предыдущее по времени кормление с вопросом об остатках (для проверки «два раза подряд»)."""
+        rec = self.get(instance_id)
+        if rec is None or not task_ids:
+            return None
+        marks = ",".join("?" * len(task_ids))
+        row = self.db.execute(
+            f"SELECT * FROM instances WHERE status = 'done' AND task_id IN ({marks}) AND due_at < ? "
+            "ORDER BY due_at DESC LIMIT 1",
+            (*sorted(task_ids), rec.due_at.isoformat()),
+        ).fetchone()
+        return _record(row) if row else None
 
     def mark_missed(self, instance_id: str) -> bool:
         with self.db:

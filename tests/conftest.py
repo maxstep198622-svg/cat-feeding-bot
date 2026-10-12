@@ -33,7 +33,7 @@ def base_raw():
         "tasks": [
             {
                 "id": "breakfast", "name": "Завтрак", "time": "07:45", "days": ["weekday"],
-                "primary": "papa", "backup": "tanya", "water": "Поменять воду",
+                "primary": "papa", "backup": "tanya", "water": "Поменять воду", "followup": True,
                 "portions": [
                     {"cat": "kitten", "food": "kdry", "share": 0.3},
                     {"cat": "adult", "food": "adry", "share": 0.4},
@@ -42,7 +42,7 @@ def base_raw():
             {
                 "id": "lunch", "name": "Обед", "time": "14:30", "days": ["weekday"],
                 "time_by_day": {"tue": "15:30"},
-                "primary": "tasya", "backup": "tanya",
+                "primary": "tasya", "backup": "tanya", "on_home": True, "followup": True,
                 "steps": ["Закрой Младшую в комнате", "Положи корм"],
                 "portions": [
                     {"cat": "kitten", "food": "kdry", "share": 0.3},

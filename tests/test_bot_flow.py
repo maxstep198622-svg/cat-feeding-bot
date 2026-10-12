@@ -114,8 +114,11 @@ def test_full_cycle_child_does_it(env):
     assert {e[0] for e in env.fake.edited} == {CHATS["tasya"]}
 
     before = len(env.fake.sent)
+    tick(env, 15, 5)
+    assert len(env.fake.sent) == before  # повторов и эскалаций больше нет
     tick(env, 15, 10)
-    assert len(env.fake.sent) == before  # больше ничего не шлём
+    assert [m.text for m in env.fake.sent[before:]] == [to(env, "tasya")[-1].text]
+    assert "прошло полчаса" in to(env, "tasya")[-1].text
 
 
 def test_escalation_and_double_feed_guard(env):
@@ -211,3 +214,141 @@ def test_daily_report_once(cfg, env):
     reports = [m for m in to(env, "papa") if "Итоги дня" in m.text]
     assert len(reports) == 1
     assert not [m for m in to(env, "tasya") if "Итоги дня" in m.text]
+
+
+# --- Остатки, «Я дома», тревога ---------------------------------------------
+
+
+class Message:
+    def __init__(self, text, chat_id):
+        self.text = text
+        self.replies = []
+        self.chat_id = chat_id
+
+    async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        self.replies.append(text)
+
+
+def say(env, member, text, args=None):
+    msg = Message(text, CHATS[member])
+    update = SimpleNamespace(
+        effective_message=msg,
+        effective_chat=SimpleNamespace(id=CHATS[member]),
+        effective_user=SimpleNamespace(id=CHATS[member] * 1000, username=None),
+    )
+    ctx = SimpleNamespace(application=env.app, user_data={}, args=args or [])
+    asyncio.run(env.bot.on_text(update, ctx))
+    return msg
+
+
+def test_followup_after_done(env):
+    tick(env, 14, 30)
+    env.clock.set(14, 32)
+    press(env, "tasya", f"done|{lunch_id()}")
+    tick(env, 15, 1)
+    assert not any("прошло полчаса" in m.text for m in to(env, "tasya"))
+    tick(env, 15, 2)
+    follow = [m for m in to(env, "tasya") if "прошло полчаса" in m.text]
+    assert len(follow) == 1
+    tick(env, 15, 10)
+    assert len([m for m in to(env, "tasya") if "прошло полчаса" in m.text]) == 1
+
+
+def test_followup_skipped_when_stale(env):
+    tick(env, 14, 0)
+    env.clock.set(14, 32)
+    press(env, "tasya", f"done|{lunch_id()}")
+    tick(env, 17, 0)  # бот «проспал» — старый вопрос не задаём
+    assert not any("прошло полчаса" in m.text for m in to(env, "tasya"))
+    assert env.store.get(lunch_id()).followup_sent_at is not None
+
+
+def test_leftovers_twice_alerts_parents(env):
+    tick(env, 7, 0)
+    env.clock.set(7, 50)
+    press(env, "papa", f"done|{MON.isoformat()}|breakfast")
+    q = press(env, "papa", f"left|many|{MON.isoformat()}|breakfast")
+    first = [m for m in to(env, "tanya") if "осталось много" in m.text]
+    assert len(first) == 1 and "Второе кормление подряд" not in first[0].text
+    env.clock.set(14, 40)
+    press(env, "tasya", f"done|{lunch_id()}")
+    press(env, "tasya", f"left|many|{lunch_id()}")
+    alerts = [m for m in to(env, "tanya") if "осталось много" in m.text]
+    assert len(alerts) == 2 and "Второе кормление подряд" in alerts[1].text
+    assert env.store.get(lunch_id()).leftovers == "many"
+
+
+def test_home_button_pulls_lunch_early(env):
+    env.clock.set(13, 20)
+    msg = say(env, "tasya", "🏠 Я дома")
+    lunch_msgs = [m for m in to(env, "tasya") if "пора покормить" in m.text]
+    assert len(lunch_msgs) == 1 and "Обед" in lunch_msgs[0].text
+    assert any("Тася дома" in m.text for m in to(env, "papa"))
+    assert env.store.get(lunch_id()).sent_count == 1
+    # повторное «Я дома» не дублирует напоминание
+    msg = say(env, "tasya", "🏠 Я дома")
+    assert len([m for m in to(env, "tasya") if "пора покормить" in m.text]) == 1
+    assert "ждёт" in msg.replies[0]
+    # тик в 14:30 не шлёт первое напоминание повторно (повтор — только через 10 мин после отправки)
+    tick(env, 13, 25)
+    assert len([m for m in to(env, "tasya") if "пора покормить" in m.text]) == 1
+
+
+def test_home_too_early_does_nothing(env):
+    env.clock.set(9, 0)  # до обеда больше трёх часов
+    msg = say(env, "tasya", "🏠 Я дома")
+    assert not any("пора покормить" in m.text for m in to(env, "tasya"))
+    assert "Пока ничего не нужно" in msg.replies[0]
+
+
+def test_alert_flow(env):
+    env.clock.set(16, 0)
+    say(env, "tasya", "🚨 Что-то не так")
+    q = press(env, "tasya", "alert|kitten")
+    q = press(env, "tasya", "alert|kitten|vomit")
+    for parent in ("papa", "tanya"):
+        msgs = [m for m in to(env, parent) if "🚨" in m.text]
+        assert len(msgs) == 1 and "Младшая" in msgs[0].text and "рвота" in msgs[0].text
+    assert not [m for m in to(env, "tasya") if "🚨" in m.text]
+
+
+def test_alert_rejects_garbage(env):
+    press(env, "tasya", "alert|dog|vomit")
+    press(env, "tasya", "alert|kitten|hack")
+    assert not [m for m in env.fake.sent if "🚨" in m.text]
+
+
+def test_per_task_repeat(cfg, raw):
+    from catbot.config import parse_config
+    from catbot.scheduler import State, decide, instances_for_day
+
+    raw["tasks"][0].update(repeat_every_min=5, max_repeats=3, escalate_after_min=10)
+    cfg = parse_config(raw)
+    inst = instances_for_day(cfg, MON)[0]
+    st = State(assignee="papa", sent_count=1, last_sent_at=inst.due)
+    from datetime import timedelta
+
+    assert [a.kind for a in decide(cfg, inst, st, inst.due + timedelta(minutes=5))] == ["remind"]
+    st.sent_count, st.last_sent_at = 2, inst.due + timedelta(minutes=5)
+    assert [a.kind for a in decide(cfg, inst, st, inst.due + timedelta(minutes=10))] == ["remind", "escalate"]
+
+
+def test_example_config_is_consistent():
+    from pathlib import Path
+
+    from catbot.config import load_config
+    from catbot.scheduler import check_shares, instances_for_day
+
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.example.toml")
+    assert check_shares(cfg) == []
+    assert set(cfg.modes) == {"weekday", "weekend", "kanikuly", "papa_away"}
+    weekday = [i.task.id for i in instances_for_day(cfg, MON)]
+    assert weekday == ["breakfast", "leave", "lunch", "dinner", "supper"]
+    # Тасе в будни не приходит ничего, пока она в школе (до 14:00)
+    for inst in instances_for_day(cfg, MON):
+        if inst.task.primary == "tasya":
+            assert inst.due.hour >= 14
+    # каждый слот кормления — тому, кто реально дома: утром не Тася и не Таня после 07:30
+    for inst in instances_for_day(cfg, MON):
+        if inst.due.hour < 14 and inst.due.minute + inst.due.hour * 60 >= 7 * 60 + 30:
+            assert inst.task.primary == "papa"

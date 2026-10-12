@@ -82,11 +82,13 @@ class State:
     last_sent_at: datetime | None = None
     snoozed_until: datetime | None = None
     escalated_at: datetime | None = None
+    done_at: datetime | None = None
+    followup_sent_at: datetime | None = None
 
 
 @dataclass(frozen=True)
 class Action:
-    kind: str  # remind | escalate | miss
+    kind: str  # remind | escalate | miss | followup | followup_skip
     instance: Instance
     repeat: int = 0  # номер повтора для remind (0 — первое напоминание)
 
@@ -99,8 +101,25 @@ def _give_up_after(cfg: Config, task: Task) -> timedelta:
     return timedelta(minutes=task.give_up_after_min or cfg.reminders.give_up_after_min)
 
 
+FOLLOWUP_STALE = timedelta(minutes=90)
+
+
+def _followup(cfg: Config, inst: Instance, st: State, now: datetime) -> list[Action]:
+    """Через followup_min после «Готово» спросить, убраны ли остатки и всё ли съедено."""
+    if not inst.task.followup or st.done_at is None or st.followup_sent_at is not None:
+        return []
+    at = st.done_at + timedelta(minutes=cfg.reminders.followup_min)
+    if now < at:
+        return []
+    if now - at > FOLLOWUP_STALE:  # бот был выключен — старый вопрос уже не к месту
+        return [Action("followup_skip", inst)]
+    return [Action("followup", inst)]
+
+
 def decide(cfg: Config, inst: Instance, st: State, now: datetime) -> list[Action]:
     """Что нужно сделать с задачей прямо сейчас. Вызывается на каждом «тике»."""
+    if st.status == "done":
+        return _followup(cfg, inst, st, now)
     if st.status != "pending" or now < inst.due:
         return []
     late = now - inst.due
@@ -108,22 +127,35 @@ def decide(cfg: Config, inst: Instance, st: State, now: datetime) -> list[Action
         return [Action("miss", inst)]
 
     actions: list[Action] = []
-    rem = cfg.reminders
+    task = inst.task
+    repeat_every = task.repeat_every_min if task.repeat_every_min is not None else cfg.reminders.repeat_every_min
+    max_repeats = task.max_repeats if task.max_repeats is not None else cfg.reminders.max_repeats
     if st.sent_count == 0:
         actions.append(Action("remind", inst, 0))
     elif st.snoozed_until is not None:
         if now >= st.snoozed_until and (st.last_sent_at is None or st.last_sent_at < st.snoozed_until):
             actions.append(Action("remind", inst, st.sent_count))
     elif (
-        st.sent_count <= rem.max_repeats
+        st.sent_count <= max_repeats
         and st.last_sent_at is not None
-        and now - st.last_sent_at >= timedelta(minutes=rem.repeat_every_min)
+        and now - st.last_sent_at >= timedelta(minutes=repeat_every)
     ):
         actions.append(Action("remind", inst, st.sent_count))
 
     if st.escalated_at is None and late >= _escalate_after(cfg, inst.task):
         actions.append(Action("escalate", inst))
     return actions
+
+
+def home_pull(cfg: Config, inst: Instance, st: State, member_id: str, now: datetime) -> bool:
+    """Нажали «Я дома»: прислать ли эту задачу сразу, не дожидаясь её времени."""
+    return (
+        inst.task.on_home
+        and st.status == "pending"
+        and st.assignee == member_id
+        and st.sent_count == 0
+        and inst.due - now <= timedelta(minutes=cfg.reminders.home_window_min)
+    )
 
 
 def handoff_chain(cfg: Config, task: Task) -> list[str]:

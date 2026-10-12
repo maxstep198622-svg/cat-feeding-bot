@@ -23,39 +23,62 @@ def age_months(birth: date, today: date) -> float:
 @dataclass(frozen=True)
 class Need:
     cat: Cat
-    weight_kg: float
+    weight_kg: float  # вес, от которого считали норму
     age_months: float
     stage: str
     factor: float
     kcal: float
     manual: bool  # норма задана вручную (daily_kcal)
+    note: str = ""  # предупреждение для родителей, если расчёт выглядит странно
+
+
+def _spayed_on(cat: Cat, today: date) -> bool:
+    return cat.neutered and (cat.neutered_on is None or cat.neutered_on <= today)
 
 
 def stage_and_factor(cfg: Config, cat: Cat, today: date) -> tuple[str, float]:
     months = age_months(cat.birth_date, today)
-    neutered = cat.neutered and (cat.neutered_on is None or cat.neutered_on <= today)
     e = cfg.energy
-    if months < 12:
-        if neutered:
-            return "котёнок после стерилизации", e.kitten_neutered
-        if months < 4:
-            return "котёнок до 4 месяцев", e.kitten_under_4m
-        return "котёнок 4–12 месяцев", e.kitten_4_to_12m
-    if neutered:
-        return "взрослая стерилизованная", e.adult_neutered
-    return "взрослая нестерилизованная", e.adult_intact
+    if months >= 12:
+        if _spayed_on(cat, today):
+            return "взрослая стерилизованная", e.adult_neutered
+        return "взрослая нестерилизованная", e.adult_intact
+    if months < 4:
+        stage, factor = "котёнок до 4 месяцев", e.kitten_0_4m
+    elif months < 6:
+        stage, factor = "котёнок 4–6 месяцев", e.kitten_4_6m
+    elif months < 9:
+        stage, factor = "котёнок 6–9 месяцев", e.kitten_6_9m
+    else:
+        stage, factor = "котёнок 9–12 месяцев", e.kitten_9_12m
+    if _spayed_on(cat, today):
+        days_after = (today - cat.neutered_on).days if cat.neutered_on else e.spay_recovery_days
+        if days_after >= e.spay_recovery_days:
+            factor *= 1 - e.kitten_spay_cut
+            stage += f", стерилизована (−{e.kitten_spay_cut * 100:.0f}%)"
+        else:
+            stage += ", восстановление после стерилизации — кормим по указаниям врача"
+    return stage, factor
 
 
 def daily_need(cfg: Config, cat: Cat, today: date, weight_kg: float | None = None) -> Need:
+    """Норма котёнка — от текущего веса, взрослой — от идеального (если он задан)."""
     weight = weight_kg or cat.weight_kg
     stage, factor = stage_and_factor(cfg, cat, today)
+    months = age_months(cat.birth_date, today)
+    if months >= 12 and cat.ideal_weight_kg:
+        weight = cat.ideal_weight_kg
     if cat.energy_factor:
         factor = cat.energy_factor
     if cat.daily_kcal:
         kcal, manual = cat.daily_kcal, True
     else:
         kcal, manual = rer(weight) * factor, False
-    return Need(cat, weight, age_months(cat.birth_date, today), stage, factor, kcal, manual)
+    note = ""
+    per_kg = kcal / weight
+    if months < 4 and not _spayed_on(cat, today) and not 150 <= per_kg <= 220:
+        note = f"{per_kg:.0f} ккал на кг — вне обычного для 3–4 мес. коридора 150–220. Проверьте вес и обсудите с ветеринаром."
+    return Need(cat, weight, months, stage, factor, kcal, manual, note)
 
 
 def grams(kcal: float, food: Food) -> float:

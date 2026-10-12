@@ -71,8 +71,18 @@ def reminder(cfg: Config, inst: Instance, who: str, needs: dict[str, Need], repe
     else:
         call = f"{escape(who)}, {KIND_CALL[task.kind]}"
     body = task_body(cfg, task, needs)
-    tail = "Когда закончишь — нажми «✅ Готово»."
-    return "\n".join([head, call, "", body, "", tail]) if body else "\n".join([head, call, "", tail])
+    if task.followup:
+        tail = "Как только поставишь миски — нажми «✅ Готово». Через полчаса напомню убрать остатки."
+    else:
+        tail = "Когда сделаешь — нажми «✅ Готово»."
+    if any("Готово" in step for step in task.steps):
+        tail = ""  # шаги уже говорят, когда нажать «Готово»
+    parts = [head, call]
+    if body:
+        parts += ["", body]
+    if tail:
+        parts += ["", tail]
+    return "\n".join(parts)
 
 
 def escalation(cfg: Config, inst: Instance, assignee: str, late_min: int, needs: dict[str, Need]) -> str:
@@ -87,7 +97,7 @@ def escalation(cfg: Config, inst: Instance, assignee: str, late_min: int, needs:
 def handed_off(cfg: Config, inst: Instance, from_name: str, to_name: str, needs: dict[str, Need]) -> str:
     task = inst.task
     head = f"🔁 {escape(from_name)} не может сейчас: <b>{escape(task.name)}</b> ({hm(inst.due)})"
-    call = f"{escape(to_name)}, сделаешь? Когда закончишь — нажми «✅ Готово»."
+    call = f"{escape(to_name)}, сделаешь? Как сделаешь — нажми «✅ Готово»."
     body = task_body(cfg, task, needs)
     return "\n".join([head, call, "", body]) if body else "\n".join([head, call])
 
@@ -106,6 +116,44 @@ def missed(task: Task, due: datetime, assignee: str) -> str:
     return (
         f"❌ <b>{escape(task.name)}</b> ({hm(due)}) так и не отмечено (ответственный: {escape(assignee)}). "
         "Если на самом деле всё сделано — отметьте в /today."
+    )
+
+
+def followup(inst: Instance, who: str) -> str:
+    return (
+        f"⏱ <b>{escape(inst.task.name)}</b>: прошло полчаса.\n"
+        f"{escape(who)}, убери миски с едой (влажный корм — выбросить), потом открой дверь.\n"
+        "Всё съели?"
+    )
+
+
+def leftovers_alert(inst: Instance, who: str, twice: bool) -> str:
+    text = f"🍽 {escape(inst.task.name)} ({hm(inst.due)}): осталось много корма (отметил(а) {escape(who)})."
+    if twice:
+        text += (
+            "\n⚠️ Второе кормление подряд. Посмотрите, всё ли в порядке: если котёнок вялый, не играет, "
+            "есть рвота или понос — к ветеринару в тот же день."
+        )
+    return text
+
+
+SYMPTOMS = {
+    "lethargy": "вялая, не играет",
+    "noeat": "не ест",
+    "vomit": "рвота",
+    "diarrhea": "понос",
+    "blood": "кровь",
+    "litter": "тужится в лотке / не может пописать",
+    "belly": "краснота или корочки на животе у Старшей",
+    "other": "другое — позвоню",
+}
+
+
+def alert(who: str, cat_name: str, symptom: str, at: datetime) -> str:
+    return (
+        f"🚨 <b>{escape(who)}</b>: {escape(cat_name)} — {escape(symptom)} ({hm(at)}).\n"
+        "Позвоните и посмотрите сами. Срочно к врачу: вялость у котёнка, кровь, повторная рвота, "
+        "не может пописать."
     )
 
 
@@ -138,7 +186,12 @@ def ration_text(cfg: Config, needs: dict[str, Need], weighed: dict[str, date | N
     blocks = []
     for need in needs.values():
         cat = need.cat
-        w_note = f"взвешена {weighed[cat.id].strftime('%d.%m')}" if weighed.get(cat.id) else "вес из настроек"
+        if need.age_months >= 12 and cat.ideal_weight_kg and need.weight_kg == cat.ideal_weight_kg:
+            w_note = "идеальный вес"
+        elif weighed.get(cat.id):
+            w_note = f"взвешена {weighed[cat.id].strftime('%d.%m')}"
+        else:
+            w_note = "вес из настроек"
         lines = [
             f"{cat.emoji} <b>{escape(cat.name)}</b> — {num(need.age_months, 1)} мес., {num(need.weight_kg)} кг ({w_note})",
         ]
@@ -147,6 +200,8 @@ def ration_text(cfg: Config, needs: dict[str, Need], weighed: dict[str, date | N
         else:
             lines.append(f"Стадия: {need.stage}, {num(need.factor)} × RER")
             lines.append(f"Суточная норма ≈ <b>{need.kcal:.0f} ккал</b>")
+        if need.note:
+            lines.append(f"⚠️ {escape(need.note)}")
         for mode, insts in plans.items():
             items = []
             for inst in insts:
@@ -187,7 +242,8 @@ def milestone(cat: Cat, key: str, need: Need) -> str:
         lines = [f"{name}: сегодня 4 месяца 🎉", kcal]
         if not cat.neutered:
             lines.append(
-                "Пора записаться к ветеринару на стерилизацию — её рекомендуют делать в 4–5 месяцев. "
+                "Пора записаться к ветеринару на стерилизацию — International Cat Care и «Feline Fix by Five» "
+                "рекомендуют 4–5 месяцев (первая течка бывает уже с 4 месяцев). "
                 "После операции впишите в config.toml <code>neutered = true</code> и <code>neutered_on = дата</code> — "
                 "бот сам уменьшит норму."
             )
@@ -210,14 +266,21 @@ def milestone(cat: Cat, key: str, need: Need) -> str:
         ])
     if key == "spay":
         return "\n".join([
-            f"{name}: после стерилизации аппетит растёт, а расход энергии падает.",
-            kcal,
-            "Корм для котят оставляем до года, но порции меньше. Кормим только отмеренными порциями и взвешиваем каждую неделю.",
+            f"{name}: день стерилизации.",
+            "Первые две недели кормим по указаниям врача, норма не урезается. Потом бот сам уменьшит её на 10%: "
+            "после стерилизации аппетит растёт, а расход энергии падает.",
+            "Корм для котят оставляем до года. Взвешиваем каждую неделю: если вес растёт быстрее кривой роста "
+            "или упитанность выше 5/9 — уберите ещё 5–10% (параметр kitten_spay_cut).",
         ])
     return f"{name}: {escape(key)}"
 
 
 HELP = """🐾 <b>Кошачий бот</b> напоминает, когда кормить и поить кошек, и следит, чтобы никого не забыли и не покормили дважды.
+
+<b>Кнопки внизу</b>
+🏠 Я дома — пришёл(-ла) домой: бот сразу скажет, что нужно сделать
+📋 Сегодня — что уже сделано и что ждёт
+🚨 Что-то не так — кошка вялая, не ест, рвота… Родители узнают сразу
 
 <b>Команды</b>
 /today — план на сегодня: что сделано, что ждёт (и кнопки «Готово»)
@@ -229,7 +292,7 @@ HELP = """🐾 <b>Кошачий бот</b> напоминает, когда к�
 /help — эта справка
 
 Когда приходит напоминание:
-✅ Готово — сделано
+✅ Готово — нажми, как только поставил(а) миски (через полчаса бот спросит про остатки)
 ⏰ Через 10 мин — напомнить позже
 🙅 Не могу — передать следующему, кто дома"""
 

@@ -49,6 +49,7 @@ class Cat:
     neutered_on: date | None = None
     daily_kcal: float | None = None  # ручное значение от ветеринара — важнее расчёта
     energy_factor: float | None = None  # ручной множитель к RER
+    ideal_weight_kg: float | None = None  # для взрослой норму считают от идеального веса
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,10 @@ class Task:
     time_by_tag: dict[str, time] = field(default_factory=dict)
     escalate_after_min: int | None = None
     give_up_after_min: int | None = None
+    repeat_every_min: int | None = None
+    max_repeats: int | None = None
+    on_home: bool = False  # кнопка «Я дома» присылает задачу сразу, не дожидаясь времени
+    followup: bool = False  # через followup_min спросить «остатки убраны? всё съела?»
 
 
 @dataclass(frozen=True)
@@ -89,19 +94,25 @@ class Reminders:
     snooze_min: int = 10
     escalate_after_min: int = 30
     give_up_after_min: int = 150
-    daily_report: time | None = time(21, 45)
+    daily_report: time | None = time(22, 45)
     notify_parents_on_child_done: bool = True
+    notify_parents_on_home: bool = True
+    followup_min: int = 30
+    home_window_min: int = 180  # «Я дома» подтягивает задачи, до которых осталось не больше этого
 
 
 @dataclass(frozen=True)
 class Energy:
-    """Множители к RER = 70 × масса^0,75 по стадиям жизни."""
+    """Множители к RER = 70 × масса^0,75 по стадиям жизни (MSD, AAHA 2021, уравнение роста NRC 2006)."""
 
-    kitten_under_4m: float = 3.0
-    kitten_4_to_12m: float = 2.5
-    kitten_neutered: float = 2.0
+    kitten_0_4m: float = 2.5
+    kitten_4_6m: float = 2.2
+    kitten_6_9m: float = 1.9
+    kitten_9_12m: float = 1.6
+    kitten_spay_cut: float = 0.10  # на сколько уменьшить норму котёнка после стерилизации
+    spay_recovery_days: int = 14  # первые дни после операции кормим по указаниям врача, без урезания
     adult_intact: float = 1.4
-    adult_neutered: float = 1.2
+    adult_neutered: float = 1.1  # 1,2 — стройная и активная, 1,0 — полноватая или малоактивная
 
 
 @dataclass(frozen=True)
@@ -216,15 +227,24 @@ def parse_config(raw: dict, base_dir: Path | None = None) -> Config:
     if not any(m.is_parent for m in members):
         raise ConfigError("members: нужен хотя бы один родитель (role = \"parent\")")
 
-    foods = tuple(
-        Food(
-            id=str(_require(f, "id", "foods")),
-            name=str(_require(f, "name", "foods")),
-            kcal_per_100g=float(_require(f, "kcal_per_100g", "foods")),
-            kind=str(f.get("kind", "dry")),
+    foods = []
+    for f in raw.get("foods", []):
+        where = f"foods.{f.get('id', '?')}"
+        if "kcal_per_100g" in f:
+            kcal100 = float(f["kcal_per_100g"])
+        elif "kcal_per_kg" in f:
+            kcal100 = float(f["kcal_per_kg"]) / 10
+        else:
+            raise ConfigError(f"{where}: укажите калорийность kcal_per_100g или kcal_per_kg (с упаковки)")
+        foods.append(
+            Food(
+                id=str(_require(f, "id", "foods")),
+                name=str(_require(f, "name", where)),
+                kcal_per_100g=kcal100,
+                kind=str(f.get("kind", "dry")),
+            )
         )
-        for f in raw.get("foods", [])
-    )
+    foods = tuple(foods)
     _unique_ids(foods, "foods")
     for f in foods:
         if f.kcal_per_100g <= 0:
@@ -244,12 +264,21 @@ def parse_config(raw: dict, base_dir: Path | None = None) -> Config:
                 neutered_on=_parse_date(c["neutered_on"], where) if c.get("neutered_on") else None,
                 daily_kcal=float(c["daily_kcal"]) if c.get("daily_kcal") else None,
                 energy_factor=float(c["energy_factor"]) if c.get("energy_factor") else None,
+                ideal_weight_kg=float(c["ideal_weight_kg"]) if c.get("ideal_weight_kg") else None,
             )
         )
     cats = tuple(cats)
     _unique_ids(cats, "cats")
 
     custom_modes = raw.get("modes", {})
+    for key, title in custom_modes.items():
+        if not isinstance(title, str):
+            raise ConfigError(
+                f"modes.{key}: ожидалось название режима (строка). Если это не режим — перенесите строку "
+                "выше заголовка [modes]: в TOML всё после [modes] попадает в эту таблицу."
+            )
+        if not re.fullmatch(r"[a-z0-9_]{1,20}", key) or key in WEEKDAYS or key == "all":
+            raise ConfigError(f"modes.{key}: имя режима — латиница в нижнем регистре, цифры и _")
     modes = BUILTIN_MODES + tuple(k for k in custom_modes if k not in BUILTIN_MODES)
     mode_titles = {"weekday": "Будни", "weekend": "Выходной"}
     mode_titles.update({k: str(v) for k, v in custom_modes.items()})
@@ -309,6 +338,10 @@ def parse_config(raw: dict, base_dir: Path | None = None) -> Config:
                 time_by_tag=time_by_tag,
                 escalate_after_min=t.get("escalate_after_min"),
                 give_up_after_min=t.get("give_up_after_min"),
+                repeat_every_min=t.get("repeat_every_min"),
+                max_repeats=t.get("max_repeats"),
+                on_home=bool(t.get("on_home", False)),
+                followup=bool(t.get("followup", False)),
             )
         )
     tasks = tuple(tasks)
@@ -338,7 +371,8 @@ def parse_config(raw: dict, base_dir: Path | None = None) -> Config:
         raise ConfigError("reminders: escalate_after_min должен быть меньше give_up_after_min")
 
     try:
-        energy = Energy(**{k: float(v) for k, v in raw.get("energy", {}).items()})
+        energy_raw = {k: (int(v) if k == "spay_recovery_days" else float(v)) for k, v in raw.get("energy", {}).items()}
+        energy = Energy(**energy_raw)
     except TypeError as exc:
         raise ConfigError(f"energy: {exc}") from exc
 
